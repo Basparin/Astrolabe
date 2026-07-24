@@ -5323,6 +5323,55 @@ where
     Ok(resolved)
 }
 
+/// One node-map row projected for graph-based outcome-subject resolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubjectResolutionNode {
+    pub cx_id: CxId,
+    pub qualified_name: String,
+    pub label: String,
+    pub file_path: String,
+}
+
+/// Reads the persisted node map plus edge CxId pairs needed to resolve
+/// test-report subjects (`<test file>::<case title>`) to tested symbols by
+/// graph adjacency. Rows are project-filtered; interpretation is the
+/// caller's concern.
+pub fn read_subject_resolution_graph<C>(
+    vault: &AsterVault<C>,
+    project: &str,
+) -> IngestResult<(Vec<SubjectResolutionNode>, Vec<(CxId, CxId)>)>
+where
+    C: Clock,
+{
+    let snapshot = vault.latest_seq();
+    let mut nodes = Vec::new();
+    for row in read_graph_rows::<C, NodeMapRow>(vault, snapshot, NODE_MAP_PREFIX)? {
+        if row.project != project {
+            continue;
+        }
+        if row.schema != SCHEMA_NODE_MAP {
+            return Err(IngestError::InvalidInput(format!(
+                "node map row {} has wrong schema {}",
+                row.node_id, row.schema
+            )));
+        }
+        nodes.push(SubjectResolutionNode {
+            cx_id: row.cx_id,
+            qualified_name: row.qualified_name,
+            label: row.label,
+            file_path: row.file_path,
+        });
+    }
+    let mut edges = Vec::new();
+    for row in read_graph_rows::<C, EdgeGraphRow>(vault, snapshot, EDGE_ROW_PREFIX)? {
+        if row.project != project {
+            continue;
+        }
+        edges.push((row.src, row.dst));
+    }
+    Ok((nodes, edges))
+}
+
 /// Deliberately perturbs one persisted node-map row's properties in the vault.
 ///
 /// Exists solely for the L2 shadow-parity harness (#19): it proves the parity

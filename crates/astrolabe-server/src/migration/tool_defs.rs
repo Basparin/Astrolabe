@@ -869,6 +869,10 @@ pub(crate) fn anchor_outcome_tool_definition() -> Value {
                     "type": "string",
                     "description": "Alias for report."
                 },
+                "report_path": {
+                    "type": "string",
+                    "description": "Server-readable path to the test-report file; used when neither report nor report_text is given. Full reports are far too large for an inline MCP string argument."
+                },
                 "confidence": {
                     "type": "number",
                     "description": "Optional confidence. Resolved sources require exactly 1.0; proxy sources require a finite value in (0,1) and default to 0.8."

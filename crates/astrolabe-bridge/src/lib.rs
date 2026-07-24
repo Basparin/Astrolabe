@@ -516,7 +516,10 @@ fn initialize_cbm_host_process_with_log_mode(
                 // so its INFO `mem.init`/`vmem.init` lines are dropped at the
                 // source rather than emitted. Warn/error still flow to stderr via
                 // the tracing sink installed by route_cbm_logs_to_tracing().
-                let floor = c_int::try_from(astrolabe_domain::knobs::cli_stderr_log_level_floor())
+                let floor =
+                    cbm_sys::CBMLogLevel::try_from(
+                        astrolabe_domain::knobs::cli_stderr_log_level_floor(),
+                    )
                     .unwrap_or(cbm_sys::CBMLogLevel_CBM_LOG_WARN);
                 cbm_sys::cbm_log_set_level(floor);
             }
