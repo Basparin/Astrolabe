@@ -238,6 +238,11 @@ bool cbm_perl_suppress_generic_match(bool is_perl, bool is_method, const char *c
  * Pure; unit-tested in test_registry.c. */
 bool cbm_tsjs_suppress_weak_method_match(bool is_tsjs, bool is_method, const char *strategy);
 
+/* Rust analogue: drop a weak short-name method match for Rust so `.clone()` /
+ * `.collect()` / `.to_vec()` do not fabricate a CALLS edge onto the sole
+ * namesake definition. Same drop-list as the TS/JS guard. Pure. */
+bool cbm_rust_suppress_weak_method_match(bool is_rust, bool is_method, const char *strategy);
+
 /* Get the label of a qualified name, or NULL if not found. */
 const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn);
 

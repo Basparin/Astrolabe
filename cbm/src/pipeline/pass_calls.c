@@ -546,6 +546,8 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
         lang == CBM_LANG_JAVASCRIPT || lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
     bool tsjs_drop_plain_call =
         cbm_tsjs_suppress_weak_method_match(is_tsjs, call->is_method, res.strategy);
+    bool rust_drop_plain_call =
+        cbm_rust_suppress_weak_method_match(lang == CBM_LANG_RUST, call->is_method, res.strategy);
 
     /* Service-pattern HTTP/ASYNC calls to an EXTERNAL client library (e.g.
      * `requests.get("/api/orders/{id}")`) resolve to a QN containing the library
@@ -572,7 +574,7 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
         return 0;
     }
     emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys, imp_vals,
-                         imp_count, tsjs_drop_plain_call);
+                         imp_count, tsjs_drop_plain_call || rust_drop_plain_call);
     return SKIP_ONE;
 }
 

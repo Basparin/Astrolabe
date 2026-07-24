@@ -455,6 +455,22 @@ bool cbm_tsjs_suppress_weak_method_match(bool is_tsjs, bool is_method, const cha
            strcmp(strategy, "field_type_hint") == 0 || strcmp(strategy, "fuzzy") == 0;
 }
 
+/* Rust analogue of the TS/JS guard above. A Rust method call `x.clone()` reaches
+ * the weak textual cascade ONLY when the LSP pass could not resolve the receiver
+ * type — type-resolved calls win via lsp_* strategies first. Binding such a call
+ * by a weak short-name strategy fabricates a CALLS edge onto the sole namesake
+ * definition: every `.clone()` collapses onto the one hand-written `impl Clone`,
+ * `.collect()`/`.to_vec()` likewise. Same explicit drop-list as the TS/JS guard;
+ * keep import/same-module/qualified-tail and every lsp_* strategy. Pure +
+ * side-effect-free. */
+bool cbm_rust_suppress_weak_method_match(bool is_rust, bool is_method, const char *strategy) {
+    if (!is_rust || !is_method || !strategy || !strategy[0]) {
+        return false;
+    }
+    return strcmp(strategy, "suffix_match") == 0 || strcmp(strategy, "unique_name") == 0 ||
+           strcmp(strategy, "field_type_hint") == 0 || strcmp(strategy, "fuzzy") == 0;
+}
+
 /* ── Lifecycle ──────────────────────────────────────────────────── */
 
 cbm_registry_t *cbm_registry_new(void) {
