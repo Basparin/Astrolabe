@@ -1,0 +1,27 @@
+# cargo-nextest configuration for the Astrolabe workspace nextest run
+# (scripts/ci-rust-gate.sh: `cargo nextest run --workspace`). It does NOT govern
+# the Calyx run (that runs inside calyx/, which reads
+# calyx/.config/nextest.toml). See #264.
+
+[profile.default]
+# Full coverage. Saturate the box; this is nextest's default, set explicitly so
+# the intent is visible and stable.
+test-threads = "num-cpus"
+# One gate run surfaces every failure, not just the first.
+fail-fast = false
+# A failing/flaky test must fail loudly, never be masked by a lucky re-run.
+retries = 0
+# #264/#280: a single test running 60s is a DEFECT under the sub-3-minute suite
+# doctrine (owner directive 2026-07-12): no individual test may take >60s; such
+# tests are deleted or decomposed, not tiered. slow-timeout surfaces offenders
+# in gate output (mark only -- no terminate-after -- so an honest slow test
+# fails review, not falsely killed mid-run; standing invariant 3).
+slow-timeout = "60s"
+
+[profile.fast]
+# Tier-0/1 inner loop (#263 check-fast.sh runs `--profile fast`). Historically
+# this filtered out the >=60s Astrolabe-workspace tests; those tests were
+# DELETED under the #280 sub-3-minute owner directive (2026-07-12): the bridge
+# trybuild !Send triple (~168s nested cargo) and the weave 4096 queue soak
+# (~75s). No filter remains -- fast now equals full workspace coverage; the
+# profile is kept so `--profile fast` invocations stay valid.

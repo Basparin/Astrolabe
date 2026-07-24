@@ -1,0 +1,42 @@
+[package]
+name = "astrolabe-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+astrolabe-anchors.workspace = true
+astrolabe-assay.workspace = true
+astrolabe-bridge = { path = "../astrolabe-bridge" }
+astrolabe-domain.workspace = true
+astrolabe-fleet.workspace = true
+astrolabe-guard = { path = "../astrolabe-guard" }
+astrolabe-ingest.workspace = true
+astrolabe-kernel.workspace = true
+astrolabe-lower.workspace = true
+astrolabe-oracle.workspace = true
+astrolabe-panel.workspace = true
+astrolabe-provenance.workspace = true
+astrolabe-weave.workspace = true
+calyx-aster.workspace = true
+calyx-assay.workspace = true
+calyx-core.workspace = true
+calyx-ledger.workspace = true
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde_json = "1"
+sha2 = "0.10"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "astrolabe"
+path = "src/main.rs"
+
+[[bin]]
+name = "codebase-memory-mcp"
+path = "src/codebase_memory_mcp_shim.rs"

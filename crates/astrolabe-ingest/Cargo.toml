@@ -1,0 +1,52 @@
+[package]
+name = "astrolabe-ingest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+astrolabe-domain.workspace = true
+astrolabe-kernel.workspace = true
+astrolabe-panel.workspace = true
+calyx-aster.workspace = true
+calyx-core.workspace = true
+calyx-ledger.workspace = true
+calyx-paths.workspace = true
+blake3 = "1"
+rayon = "1"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# #291: opt-in compilation of calyx-aster's crash-injection failpoints
+# (`crash_fsv_after_wal_append` / `_after_mvcc_commit` / `_after_checkpoint`,
+# each of which parks the process at a durable-commit boundary) for the
+# child-process crash-recovery FSV cluster in `src/ledger_verify.rs`
+# (the `kill_after_*` tests + their `crash_*_child` helpers, gated behind
+# `cfg(feature = "crash-fsv-tests")`).
+#
+# This is deliberately NOT a default feature and NOT a [dev-dependencies]
+# feature line. A `[dev-dependencies] calyx-aster = { features = ["crash-fsv"] }`
+# unifies that feature into EVERY dev-target build of this crate — including the
+# optimized `--example` builds the lscale bench compiles
+# (`cargo run --release --example ...`), where calyx-aster's #276 build-time
+# guard correctly refuses `crash-fsv` + `not(debug_assertions)` with a
+# `compile_error!`. That unification was the release-gate RED this fixes.
+#
+# As a named, non-default feature the failpoints are compiled only when a caller
+# opts in explicitly (`cargo test -p astrolabe-ingest --features crash-fsv-tests`,
+# always in the debug profile so the #276 guard stays silent). The normal/bin
+# feature resolution of the shipped `astrolabe` binary never activates it, so the
+# release binary is failpoint-free. The standing byte-level proof is
+# `scripts/check-release-failpoint-strings.py` (wired into check-release.sh),
+# which fails closed if the marker ever ships. The default suite no longer runs
+# this cluster, so its coverage is restored by the impact-gated `crash-fsv` suite
+# stage in scripts/check.sh (registered in scripts/check-suite-impact.py).
+crash-fsv-tests = ["calyx-aster/crash-fsv"]

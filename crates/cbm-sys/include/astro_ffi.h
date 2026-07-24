@@ -1,0 +1,88 @@
+#ifndef ASTROLABE_ASTRO_FFI_H
+#define ASTROLABE_ASTRO_FFI_H
+
+#if !defined(CBM_API)
+#if defined(_WIN32)
+#define CBM_API __declspec(dllexport)
+#else
+#define CBM_API __attribute__((visibility("default")))
+#endif
+#endif
+
+#include <stdbool.h>
+#include <stddef.h>
+
+#include "cbm.h"
+#include "discover/discover.h"
+#include "foundation/log.h"
+#include "foundation/mem.h"
+#include "foundation/platform.h"
+#include "git/git_context.h"
+#include "mcp/mcp.h"
+#include "pipeline/pipeline.h"
+#include "store/store.h"
+#include "watcher/watcher.h"
+
+CBM_API void cbm_cli_set_version(const char *ver);
+/* #416: per-tool `--help` formatter shared with the standalone binary. Prints
+ * the supported input forms and the tool's JSON argument schema to stdout,
+ * using `prog` as the program name in the Usage lines. Returns 0 if the tool
+ * is known, non-zero (and prints nothing) if it is not. */
+CBM_API int cbm_cli_print_tool_help_prog(const char *prog, const char *tool_name);
+CBM_API int cbm_cmd_install(int argc, char **argv);
+CBM_API int cbm_cmd_uninstall(int argc, char **argv);
+CBM_API int cbm_cmd_update(int argc, char **argv);
+CBM_API char *cbm_build_install_plan_json(const char *home, const char *binary_path);
+/* Release a heap string returned by a CBM API through CBM's own allocator. */
+CBM_API void cbm_free_string(char *value);
+CBM_API void cbm_index_set_worker_role(bool is_worker, const char *response_out);
+CBM_API void cbm_index_supervisor_mark_host(void);
+CBM_API void cbm_http_server_set_binary_path(const char *path);
+
+CBM_API void *cbm_mimalloc_malloc(size_t size);
+CBM_API void *cbm_mimalloc_malloc_aligned(size_t size, size_t alignment);
+CBM_API void *cbm_mimalloc_zalloc_aligned(size_t size, size_t alignment);
+CBM_API void *cbm_mimalloc_realloc_aligned(void *p, size_t newsize, size_t alignment);
+CBM_API void cbm_mimalloc_free(void *p);
+CBM_API size_t cbm_mimalloc_usable_size(const void *p);
+CBM_API void cbm_mimalloc_collect(bool force);
+CBM_API int cbm_mimalloc_version(void);
+CBM_API void cbm_mimalloc_process_info(size_t *elapsed_msecs,
+                                       size_t *user_msecs,
+                                       size_t *system_msecs,
+                                       size_t *current_rss,
+                                       size_t *peak_rss,
+                                       size_t *current_commit,
+                                       size_t *peak_commit,
+                                       size_t *page_faults);
+
+/* Native test probes implemented by Astrolabe's libcbm patch. They make the
+ * C compiler's size, alignment, and field offsets observable to Rust tests. */
+CBM_API int cbm_abi_layout_size(const char *type_name, size_t *size_out, size_t *align_out);
+CBM_API int cbm_abi_layout_offset(const char *type_name, const char *field_name,
+                                  size_t *offset_out);
+
+/* Store configuration across the FFI boundary (#240) and the fail-closed
+ * environment fault record (#241). Implemented by patches/cbm/env_store_config.c
+ * and consumed by the store-resolution overlay of the pinned CBM sources.
+ *
+ * These exist because the environment is NOT a usable channel between the Rust
+ * host and libcbm on Windows: `std::env::set_var` writes the Win32 environment
+ * block, while `cbm_safe_getenv` walks the C runtime's `environ` array, and the
+ * two are synchronised only for the environment the process inherited. Passing
+ * the store path as a parameter is the durable contract; see
+ * astrolabe_bridge::set_cbm_cache_dir. */
+CBM_API int cbm_astro_set_cache_dir(const char *path);
+CBM_API void cbm_astro_clear_cache_dir(void);
+CBM_API const char *cbm_astro_cache_dir_override(void);
+CBM_API void cbm_astro_env_record_fault(const char *code, const char *var, const char *message,
+                                        const char *remediation);
+CBM_API void cbm_astro_env_record_truncation(const char *name, size_t needed, size_t capacity);
+CBM_API void cbm_astro_env_record_unresolvable_store(void);
+CBM_API int cbm_astro_env_faulted_for(const char *name);
+CBM_API const char *cbm_astro_env_fault_code(void);
+CBM_API const char *cbm_astro_env_fault_message(void);
+CBM_API const char *cbm_astro_env_fault_remediation(void);
+CBM_API void cbm_astro_env_fault_clear(void);
+
+#endif /* ASTROLABE_ASTRO_FFI_H */

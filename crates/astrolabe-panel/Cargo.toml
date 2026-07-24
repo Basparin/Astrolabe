@@ -1,0 +1,21 @@
+[package]
+name = "astrolabe-panel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+astrolabe-domain.workspace = true
+calyx-core.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[features]
+default = []
+multi-vector = []
+
+[lib]
+path = "src/lib.rs"

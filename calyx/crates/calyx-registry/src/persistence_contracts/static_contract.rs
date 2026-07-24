@@ -1,0 +1,686 @@
+#[cfg(feature = "ml-runtime")]
+use std::fs::{self, File};
+#[cfg(feature = "ml-runtime")]
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+#[cfg(feature = "ml-runtime")]
+use calyx_core::Modality;
+use calyx_core::{CalyxError, Result, SlotShape};
+#[cfg(feature = "ml-runtime")]
+use serde_json::Value;
+
+#[cfg(feature = "ml-runtime")]
+mod fastembed_contract;
+
+#[cfg(feature = "ml-runtime")]
+use fastembed_contract::{
+    fastembed_bgem3_contract, fastembed_reranker_contract, fastembed_sparse_contract,
+};
+
+#[cfg(feature = "ml-runtime")]
+use crate::Qwen3ModelFiles;
+#[cfg(feature = "ml-runtime")]
+use crate::commission::canonical_local_model_device;
+#[cfg(feature = "ml-runtime")]
+use crate::commission::{
+    profile_safetensors_source, profile_safetensors_sources, resolve_safetensors_weight_set,
+};
+use crate::frozen::{FrozenLensContract, LensDType, NormPolicy, sha256_digest};
+use crate::identity::{
+    ContractFacts, contract_from_facts, external_command_corpus_hash,
+    external_command_weights_hash, multimodal_adapter_corpus_hash, onnx_colbert_corpus_hash,
+    onnx_custom_corpus_hash, static_lookup_corpus_hash,
+};
+use crate::runtime::adapters::{MultimodalAxis, load_adapter_config};
+#[cfg(feature = "ml-runtime")]
+use crate::runtime::candle::{CandlePoolingPolicy, CandlePrecision, candle_corpus_hash};
+use crate::runtime::common::validate_contract_covers_loaded_paths;
+#[cfg(feature = "ml-runtime")]
+use crate::runtime::common::{DEFAULT_MAX_TOKENS, hash_files};
+#[cfg(feature = "ml-runtime")]
+use crate::runtime::qwen3::qwen3_corpus_hash;
+use crate::{AlgorithmicEncoder, LensRuntime, LensSpec};
+
+#[cfg(feature = "ml-runtime")]
+const DEFAULT_QWEN3_MODEL: &str = "Qwen/Qwen3-Embedding-0.6B";
+#[cfg(feature = "ml-runtime")]
+const STATIC_LOOKUP_MAGIC: &[u8; 8] = b"CXLKUP1\0";
+#[cfg(feature = "ml-runtime")]
+const STATIC_LOOKUP_HEADER_LEN: usize = 24;
+
+pub(crate) fn derive_runtime_contract_from_spec(spec: &LensSpec) -> Result<FrozenLensContract> {
+    match &spec.runtime {
+        LensRuntime::Algorithmic { kind } => algorithmic_contract(spec, kind),
+        LensRuntime::TeiHttp { endpoint } => tei_contract(spec, endpoint),
+        LensRuntime::ExternalCmd { cmd, args } => external_contract(spec, cmd, args),
+        #[cfg(feature = "ml-runtime")]
+        LensRuntime::CandleLocal {
+            model_id,
+            files,
+            device,
+            dtype,
+            pooling,
+        } => candle_contract(spec, model_id, files, device, dtype, pooling),
+        #[cfg(feature = "ml-runtime")]
+        LensRuntime::Onnx { model_id, files } => onnx_contract(spec, model_id, files),
+        #[cfg(feature = "ml-runtime")]
+        LensRuntime::OnnxColbert { model_id, files } => {
+            onnx_colbert_contract(spec, model_id, files)
+        }
+        #[cfg(feature = "ml-runtime")]
+        LensRuntime::FastembedSparse { model_id, files } => {
+            fastembed_sparse_contract(spec, model_id, files)
+        }
+        #[cfg(feature = "ml-runtime")]
+        LensRuntime::FastembedBgem3 {
+            model_id,
+            files,
+            output,
+        } => fastembed_bgem3_contract(spec, model_id, files, *output),
+        #[cfg(feature = "ml-runtime")]
+        LensRuntime::FastembedReranker { model_id, files } => {
+            fastembed_reranker_contract(spec, model_id, files)
+        }
+        #[cfg(feature = "ml-runtime")]
+        LensRuntime::FastembedQwen3 {
+            model_id,
+            files,
+            device,
+            dtype,
+        } => qwen3_contract(spec, model_id, files, device, dtype),
+        #[cfg(feature = "ml-runtime")]
+        LensRuntime::StaticLookup {
+            embeddings_file,
+            tokenizer,
+            dim,
+        } => static_lookup_contract(spec, embeddings_file, tokenizer, *dim),
+        #[cfg(not(feature = "ml-runtime"))]
+        LensRuntime::CandleLocal { .. }
+        | LensRuntime::Onnx { .. }
+        | LensRuntime::OnnxColbert { .. }
+        | LensRuntime::FastembedSparse { .. }
+        | LensRuntime::FastembedBgem3 { .. }
+        | LensRuntime::FastembedReranker { .. }
+        | LensRuntime::FastembedQwen3 { .. }
+        | LensRuntime::StaticLookup { .. } => Err(ml_runtime_disabled(spec)),
+        LensRuntime::MultimodalAdapter {
+            axis,
+            model_id,
+            adapter_config,
+            files,
+        } => multimodal_adapter_contract(spec, axis, model_id, adapter_config.as_deref(), files),
+    }
+}
+
+fn algorithmic_contract(spec: &LensSpec, kind: &str) -> Result<FrozenLensContract> {
+    let encoder = algorithmic_encoder(kind, spec.output).ok_or_else(|| {
+        lens_config_invalid(format!(
+            "unsupported algorithmic lens kind {kind} for persisted lens {}",
+            spec.name
+        ))
+    })?;
+    if encoder == AlgorithmicEncoder::ByteFeatures {
+        return Ok(FrozenLensContract::algorithmic_byte_features(
+            &spec.name,
+            spec.modality,
+        ));
+    }
+    let encoder_text = format!("{encoder:?}:{}", encoder.dim());
+    Ok(FrozenLensContract::new(
+        spec.name.clone(),
+        sha256_digest(&[b"algorithmic-runtime-v2", encoder_text.as_bytes()]),
+        sha256_digest(&[b"algorithmic-data-oblivious"]),
+        encoder.shape(),
+        spec.modality,
+        LensDType::F32,
+        NormPolicy::None,
+    ))
+}
+
+fn algorithmic_encoder(kind: &str, shape: SlotShape) -> Option<AlgorithmicEncoder> {
+    match kind {
+        "byte_features" | "byte-features" | "byte" => Some(AlgorithmicEncoder::ByteFeatures),
+        "scalar" => Some(AlgorithmicEncoder::Scalar),
+        "ast_style" | "ast-style" => Some(AlgorithmicEncoder::AstStyle),
+        "gdelt_cameo" | "gdelt-cameo" => Some(AlgorithmicEncoder::GdeltCameo),
+        "gdelt_actor_geo" | "gdelt-actor-geo" => Some(AlgorithmicEncoder::GdeltActorGeo {
+            dim: sparse_dim(shape)?,
+        }),
+        "gdelt_source_domain" | "gdelt-source-domain" => {
+            Some(AlgorithmicEncoder::GdeltSourceDomain {
+                dim: sparse_dim(shape)?,
+            })
+        }
+        "gdelt_event_geo" | "gdelt-event-geo" => Some(AlgorithmicEncoder::GdeltEventGeo {
+            dim: sparse_dim(shape)?,
+        }),
+        "gdelt_actor_pair" | "gdelt-actor-pair" => Some(AlgorithmicEncoder::GdeltActorPair {
+            dim: sparse_dim(shape)?,
+        }),
+        "gdelt_event_actor" | "gdelt-event-actor" => Some(AlgorithmicEncoder::GdeltEventActor {
+            dim: sparse_dim(shape)?,
+        }),
+        "gdelt_tone_signal" | "gdelt-tone-signal" => Some(AlgorithmicEncoder::GdeltToneSignal {
+            dim: sparse_dim(shape)?,
+        }),
+        "gdelt_source_event" | "gdelt-source-event" => Some(AlgorithmicEncoder::GdeltSourceEvent {
+            dim: sparse_dim(shape)?,
+        }),
+        "sparse" | "sparse_keywords" | "sparse-keywords" => {
+            Some(AlgorithmicEncoder::SparseKeywords {
+                dim: sparse_dim(shape)?,
+            })
+        }
+        "token_hash" | "token-hash" | "multi_hash" | "multi-hash" => {
+            Some(AlgorithmicEncoder::TokenHash {
+                token_dim: token_dim(shape)?,
+            })
+        }
+        "one_hot" | "one-hot" => Some(AlgorithmicEncoder::OneHot {
+            buckets: dense_dim(shape)?,
+        }),
+        value => {
+            if let Some(dim) = value
+                .strip_prefix("sparse_keywords:")
+                .or_else(|| value.strip_prefix("sparse-keywords:"))
+                .and_then(|dim| dim.parse().ok())
+            {
+                return Some(AlgorithmicEncoder::SparseKeywords { dim });
+            }
+            if let Some(token_dim) = value
+                .strip_prefix("token_hash:")
+                .or_else(|| value.strip_prefix("token-hash:"))
+                .or_else(|| value.strip_prefix("multi_hash:"))
+                .or_else(|| value.strip_prefix("multi-hash:"))
+                .and_then(|dim| dim.parse().ok())
+            {
+                return Some(AlgorithmicEncoder::TokenHash { token_dim });
+            }
+            value
+                .strip_prefix("one_hot:")
+                .or_else(|| value.strip_prefix("one-hot:"))
+                .and_then(|buckets| buckets.parse().ok())
+                .map(|buckets| AlgorithmicEncoder::OneHot { buckets })
+        }
+    }
+}
+
+fn tei_contract(spec: &LensSpec, endpoint: &str) -> Result<FrozenLensContract> {
+    let dim = dense_dim(spec.output).ok_or_else(|| {
+        lens_config_invalid(format!(
+            "TEI lens {} requires dense output shape, got {:?}",
+            spec.name, spec.output
+        ))
+    })?;
+    Ok(FrozenLensContract::tei_http(
+        &spec.name,
+        endpoint,
+        spec.modality,
+        dim,
+    ))
+}
+
+fn external_contract(spec: &LensSpec, cmd: &str, args: &[String]) -> Result<FrozenLensContract> {
+    let dim = dense_dim(spec.output).ok_or_else(|| {
+        lens_config_invalid(format!(
+            "external command lens {} requires dense output shape, got {:?}",
+            spec.name, spec.output
+        ))
+    })?;
+    Ok(contract_from_facts(ContractFacts {
+        name: spec.name.clone(),
+        weights_sha256: external_command_weights_hash(cmd, args),
+        corpus_hash: external_command_corpus_hash(),
+        shape: SlotShape::Dense(dim),
+        modality: spec.modality,
+        norm: NormPolicy::None,
+    }))
+}
+
+#[cfg(feature = "ml-runtime")]
+fn candle_contract(
+    spec: &LensSpec,
+    model_id: &str,
+    files: &[PathBuf],
+    device: &str,
+    dtype: &str,
+    pooling: &str,
+) -> Result<FrozenLensContract> {
+    let [weights, tokenizer, config, ..] = files else {
+        return Err(lens_config_invalid(
+            "LensRuntime::CandleLocal requires weights, tokenizer, and config paths",
+        ));
+    };
+    ensure_file("candle weights", weights)?;
+    ensure_file("candle tokenizer", tokenizer)?;
+    ensure_file("candle config", config)?;
+    let observed_hash = hash_files(&files.to_vec())?;
+    if observed_hash != spec.weights_sha256 {
+        return Err(CalyxError::lens_frozen_violation(format!(
+            "candle static contract artifact hash drift for {}",
+            spec.name
+        )));
+    }
+    let weight_set = resolve_safetensors_weight_set("candle-local", files)?;
+    let canonical_weight = fs::canonicalize(weights).map_err(|error| {
+        lens_config_invalid(format!(
+            "canonicalize candle contract weight {} failed: {error}",
+            weights.display()
+        ))
+    })?;
+    let resolved_weight = fs::canonicalize(&weight_set[0]).map_err(|error| {
+        lens_config_invalid(format!(
+            "canonicalize resolved candle contract weight {} failed: {error}",
+            weight_set[0].display()
+        ))
+    })?;
+    if resolved_weight != canonical_weight {
+        return Err(lens_config_invalid(
+            "candle static contract weight does not match the resolved safetensors set",
+        ));
+    }
+    let dim = dense_hidden_size(config, "candle")?;
+    let precision = CandlePrecision::parse(dtype)?;
+    let execution_device = canonical_local_model_device("candle-local", Some(device))?
+        .ok_or_else(|| lens_config_invalid("candle-local produced no execution device"))?;
+    if execution_device == "cpu" && precision != CandlePrecision::F32 {
+        return Err(lens_config_invalid(format!(
+            "candle CPU execution requires f32, but {} declares {}",
+            spec.name,
+            precision.as_str()
+        )));
+    }
+    let pooling = CandlePoolingPolicy::parse(pooling)?;
+    let source_tensor_dtype_profile = profile_safetensors_source(&weight_set[0])?;
+    let corpus_hash = candle_corpus_hash(
+        model_id,
+        DEFAULT_MAX_TOKENS,
+        &execution_device,
+        precision,
+        pooling,
+        spec.norm_policy,
+        &source_tensor_dtype_profile,
+    );
+    Ok(contract_from_facts(ContractFacts {
+        name: spec.name.clone(),
+        weights_sha256: observed_hash,
+        corpus_hash,
+        shape: SlotShape::Dense(dim),
+        modality: Modality::Text,
+        norm: spec.norm_policy,
+    }))
+}
+
+#[cfg(feature = "ml-runtime")]
+fn onnx_contract(spec: &LensSpec, model_id: &str, files: &[PathBuf]) -> Result<FrozenLensContract> {
+    let [_model, _tokenizer, config, ..] = files else {
+        return Err(lens_config_invalid(
+            "LensRuntime::Onnx requires model, tokenizer, and config paths",
+        ));
+    };
+    for path in files {
+        ensure_file("ONNX contract artifact", path)?;
+    }
+    let observed_hash = hash_files(&files.to_vec())?;
+    if observed_hash != spec.weights_sha256 {
+        return Err(CalyxError::lens_frozen_violation(format!(
+            "ONNX static contract artifact hash drift for {}",
+            spec.name
+        )));
+    }
+    let pooling = onnx_pooling_from_config(config)?;
+    Ok(contract_from_facts(ContractFacts {
+        name: spec.name.clone(),
+        weights_sha256: observed_hash,
+        corpus_hash: onnx_custom_corpus_hash(model_id, spec.output, pooling, spec.norm_policy),
+        shape: spec.output,
+        modality: spec.modality,
+        norm: spec.norm_policy,
+    }))
+}
+
+#[cfg(feature = "ml-runtime")]
+fn onnx_colbert_contract(
+    spec: &LensSpec,
+    model_id: &str,
+    files: &[PathBuf],
+) -> Result<FrozenLensContract> {
+    let [_model, _tokenizer, _config, ..] = files else {
+        return Err(lens_config_invalid(
+            "LensRuntime::OnnxColbert requires model, tokenizer, and config paths",
+        ));
+    };
+    for path in files {
+        ensure_file("ONNX ColBERT contract artifact", path)?;
+    }
+    let observed_hash = hash_files(&files.to_vec())?;
+    if observed_hash != spec.weights_sha256 {
+        return Err(CalyxError::lens_frozen_violation(format!(
+            "ONNX ColBERT static contract artifact hash drift for {}",
+            spec.name
+        )));
+    }
+    Ok(contract_from_facts(ContractFacts {
+        name: spec.name.clone(),
+        weights_sha256: observed_hash,
+        corpus_hash: onnx_colbert_corpus_hash(model_id),
+        shape: spec.output,
+        modality: Modality::Text,
+        norm: NormPolicy::Finite,
+    }))
+}
+
+#[cfg(feature = "ml-runtime")]
+fn qwen3_contract(
+    spec: &LensSpec,
+    model_id: &str,
+    files: &[PathBuf],
+    device: &str,
+    dtype: &str,
+) -> Result<FrozenLensContract> {
+    let model_id = qwen3_model_id(model_id)?;
+    let files = Qwen3ModelFiles::from_paths(model_id.clone(), files.to_vec())?;
+    for path in files.artifact_paths() {
+        ensure_file("fastembed-qwen3 contract artifact", &path)?;
+    }
+    let observed_hash = hash_files(&files.artifact_paths())?;
+    if observed_hash != spec.weights_sha256 {
+        return Err(CalyxError::lens_frozen_violation(format!(
+            "fastembed-qwen3 static contract artifact hash drift for {}",
+            spec.name
+        )));
+    }
+    let precision = CandlePrecision::parse(dtype)?;
+    let execution_device = canonical_local_model_device("fastembed-qwen3", Some(device))?
+        .ok_or_else(|| lens_config_invalid("fastembed-qwen3 produced no execution device"))?;
+    if execution_device == "cpu" && precision != CandlePrecision::F32 {
+        return Err(lens_config_invalid(format!(
+            "fastembed-qwen3 CPU execution requires f32, but {} declares {}",
+            spec.name,
+            precision.as_str()
+        )));
+    }
+    let dim = dense_hidden_size(&files.config, "Qwen3")?;
+    let source_tensor_dtype_profile = profile_safetensors_sources(&files.weights)?;
+    Ok(contract_from_facts(ContractFacts {
+        name: spec.name.clone(),
+        weights_sha256: observed_hash,
+        corpus_hash: qwen3_corpus_hash(
+            &model_id,
+            &execution_device,
+            precision,
+            32_768,
+            &source_tensor_dtype_profile,
+        ),
+        shape: SlotShape::Dense(dim),
+        modality: Modality::Text,
+        norm: NormPolicy::unit(),
+    }))
+}
+
+#[cfg(feature = "ml-runtime")]
+fn static_lookup_contract(
+    spec: &LensSpec,
+    embeddings_file: &Path,
+    tokenizer: &Path,
+    expected_dim: u32,
+) -> Result<FrozenLensContract> {
+    let (dim, dtype) = static_lookup_header(embeddings_file)?;
+    if dim != expected_dim {
+        return Err(CalyxError::lens_dim_mismatch(format!(
+            "static lookup matrix dim {dim} != expected {expected_dim}"
+        )));
+    }
+    ensure_file("static lookup tokenizer", tokenizer)?;
+    let observed_hash = hash_files(&[embeddings_file.to_path_buf(), tokenizer.to_path_buf()])?;
+    if observed_hash != spec.weights_sha256 {
+        return Err(CalyxError::lens_frozen_violation(format!(
+            "static lookup contract artifact hash drift for {}",
+            spec.name
+        )));
+    }
+    Ok(contract_from_facts(ContractFacts {
+        name: spec.name.clone(),
+        weights_sha256: observed_hash,
+        corpus_hash: static_lookup_corpus_hash(dim, dtype),
+        shape: SlotShape::Dense(dim),
+        modality: Modality::Text,
+        norm: spec.norm_policy,
+    }))
+}
+
+fn multimodal_adapter_contract(
+    spec: &LensSpec,
+    axis: &str,
+    model_id: &str,
+    adapter_config: Option<&Path>,
+    files: &[PathBuf],
+) -> Result<FrozenLensContract> {
+    let adapter_config = adapter_config.ok_or_else(|| {
+        lens_config_invalid("multimodal adapter static contract requires adapter_config")
+    })?;
+    ensure_file("multimodal adapter config", adapter_config)?;
+    if files.is_empty() {
+        return Err(lens_config_invalid(
+            "multimodal adapter static contract requires persisted artifact files",
+        ));
+    }
+    for path in files {
+        ensure_file("multimodal adapter contract artifact", path)?;
+    }
+    let parsed_axis = MultimodalAxis::parse(axis)?;
+    let expected_axis = modality_axis(spec.modality);
+    if parsed_axis.as_str() != expected_axis {
+        return Err(CalyxError::lens_frozen_violation(format!(
+            "multimodal adapter axis {axis} does not match modality {:?}",
+            spec.modality
+        )));
+    }
+    let dim = dense_dim(spec.output).ok_or_else(|| {
+        lens_config_invalid(format!(
+            "multimodal adapter {} requires dense output shape, got {:?}",
+            spec.name, spec.output
+        ))
+    })?;
+    let config = load_adapter_config(adapter_config, parsed_axis, model_id, Some(dim))?;
+    validate_contract_covers_loaded_paths("multimodal-adapter", &config.contract_paths(), files)?;
+    let observed_hash = crate::runtime::common::hash_files(&files.to_vec())?;
+    if observed_hash != spec.weights_sha256 {
+        return Err(CalyxError::lens_frozen_violation(format!(
+            "multimodal adapter static contract artifact hash drift for {}",
+            spec.name
+        )));
+    }
+    Ok(contract_from_facts(ContractFacts {
+        name: spec.name.clone(),
+        weights_sha256: observed_hash,
+        corpus_hash: multimodal_adapter_corpus_hash(&spec.name, parsed_axis.as_str(), model_id),
+        shape: SlotShape::Dense(dim),
+        modality: spec.modality,
+        norm: NormPolicy::unit(),
+    }))
+}
+
+fn modality_axis(modality: calyx_core::Modality) -> &'static str {
+    match modality {
+        calyx_core::Modality::Text => "text",
+        calyx_core::Modality::Code => "code",
+        calyx_core::Modality::Image => "image",
+        calyx_core::Modality::Audio => "audio",
+        calyx_core::Modality::Video => "video",
+        calyx_core::Modality::Protein => "protein",
+        calyx_core::Modality::Dna => "dna",
+        calyx_core::Modality::Molecule => "molecule",
+        calyx_core::Modality::Structured => "structured",
+        calyx_core::Modality::Mixed => "mixed",
+    }
+}
+
+#[cfg(feature = "ml-runtime")]
+fn static_lookup_header(path: &Path) -> Result<(u32, &'static str)> {
+    let mut file = File::open(path).map_err(|err| {
+        lens_config_invalid(format!(
+            "open static lookup matrix {} failed: {err}",
+            path.display()
+        ))
+    })?;
+    let len = file
+        .metadata()
+        .map_err(|err| {
+            lens_config_invalid(format!(
+                "stat static lookup matrix {} failed: {err}",
+                path.display()
+            ))
+        })?
+        .len() as usize;
+    let mut header = [0_u8; STATIC_LOOKUP_HEADER_LEN];
+    file.read_exact(&mut header).map_err(|err| {
+        lens_config_invalid(format!(
+            "read static lookup matrix header {} failed: {err}",
+            path.display()
+        ))
+    })?;
+    if len < STATIC_LOOKUP_HEADER_LEN || &header[..8] != STATIC_LOOKUP_MAGIC {
+        return Err(lens_config_invalid(format!(
+            "static lookup matrix {} has invalid magic/header",
+            path.display()
+        )));
+    }
+    let rows = u32::from_le_bytes(header[8..12].try_into().expect("rows"));
+    let dim = u32::from_le_bytes(header[12..16].try_into().expect("dim"));
+    let (dtype, width) = match header[16] {
+        1 => ("int8", 1usize),
+        2 => ("f16", 2usize),
+        3 => ("f32", 4usize),
+        other => {
+            return Err(lens_config_invalid(format!(
+                "unsupported static lookup dtype {other}"
+            )));
+        }
+    };
+    let expected = STATIC_LOOKUP_HEADER_LEN
+        .checked_add(rows as usize * dim as usize * width)
+        .ok_or_else(|| CalyxError::lens_dim_mismatch("static lookup matrix size overflow"))?;
+    if len != expected {
+        return Err(CalyxError::lens_dim_mismatch(format!(
+            "static lookup matrix byte length {len} != expected {expected}"
+        )));
+    }
+    Ok((dim, dtype))
+}
+
+#[cfg(feature = "ml-runtime")]
+fn dense_hidden_size(path: &Path, label: &str) -> Result<u32> {
+    let value = read_json(path, label)?;
+    let hidden = value
+        .get("hidden_size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| lens_config_invalid(format!("{label} config missing hidden_size")))?;
+    u32::try_from(hidden).map_err(|_| CalyxError::lens_dim_mismatch("hidden_size exceeds u32"))
+}
+
+#[cfg(feature = "ml-runtime")]
+fn onnx_pooling_from_config(path: &Path) -> Result<&'static str> {
+    let value = read_json(path, "ONNX")?;
+    let Some(raw) = value
+        .get("pooling")
+        .or_else(|| value.get("pooling_policy"))
+        .and_then(Value::as_str)
+    else {
+        return Ok("mean");
+    };
+    match raw {
+        "mean" => Ok("mean"),
+        "cls" => Ok("cls"),
+        "last_token" | "last-token" => Ok("last_token"),
+        other => Err(lens_config_invalid(format!(
+            "unsupported ONNX pooling {other}"
+        ))),
+    }
+}
+
+#[cfg(feature = "ml-runtime")]
+fn read_json(path: &Path, label: &str) -> Result<Value> {
+    let bytes = fs::read(path).map_err(|err| {
+        lens_config_invalid(format!(
+            "read {label} config {} failed: {err}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_slice(&bytes)
+        .map_err(|err| lens_config_invalid(format!("parse {label} config failed: {err}")))
+}
+
+#[cfg(feature = "ml-runtime")]
+fn qwen3_model_id(raw: &str) -> Result<String> {
+    match normalized(raw).as_str() {
+        "qwen/qwen3-embedding-0.6b" | "qwen3-embedding-0.6b" | "qwen3-0.6b" => {
+            Ok(DEFAULT_QWEN3_MODEL.to_string())
+        }
+        other => Err(CalyxError::lens_unreachable(format!(
+            "unsupported fastembed-qwen3 model {other}; expected {DEFAULT_QWEN3_MODEL}"
+        ))),
+    }
+}
+
+fn dense_dim(shape: SlotShape) -> Option<u32> {
+    match shape {
+        SlotShape::Dense(dim) => Some(dim),
+        SlotShape::Sparse(_) | SlotShape::Multi { .. } => None,
+    }
+}
+
+fn sparse_dim(shape: SlotShape) -> Option<u32> {
+    match shape {
+        SlotShape::Sparse(dim) => Some(dim),
+        SlotShape::Dense(_) | SlotShape::Multi { .. } => None,
+    }
+}
+
+fn token_dim(shape: SlotShape) -> Option<u32> {
+    match shape {
+        SlotShape::Multi { token_dim } => Some(token_dim),
+        SlotShape::Dense(_) | SlotShape::Sparse(_) => None,
+    }
+}
+
+pub(super) fn ensure_file(label: &str, path: &Path) -> Result<()> {
+    if path.is_file() {
+        return Ok(());
+    }
+    Err(lens_config_invalid(format!(
+        "{label} {} is missing",
+        path.display()
+    )))
+}
+
+#[cfg(feature = "ml-runtime")]
+fn normalized(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase()
+}
+
+pub(super) fn lens_config_invalid(message: impl Into<String>) -> CalyxError {
+    CalyxError {
+        code: "CALYX_LENS_CONFIG_INVALID",
+        message: message.into(),
+        remediation: "fix persisted LensSpec runtime fields or re-register the lens",
+    }
+}
+
+/// Fail-closed error for neural-runtime contract derivation when the crate was
+/// built without the `ml-runtime` feature (#297).
+#[cfg(not(feature = "ml-runtime"))]
+fn ml_runtime_disabled(spec: &LensSpec) -> CalyxError {
+    CalyxError {
+        code: "CALYX_REGISTRY_ML_RUNTIME_DISABLED",
+        message: format!(
+            "lens {} uses neural runtime {} but calyx-registry was built without the \
+             `ml-runtime` feature (ort/fastembed/candle/tokenizers are compiled out)",
+            spec.name,
+            crate::spec::ml_runtime_kind(&spec.runtime)
+        ),
+        remediation: "rebuild the consuming crate with calyx-registry's `ml-runtime` feature \
+                      enabled to derive neural embedding lens contracts",
+    }
+}

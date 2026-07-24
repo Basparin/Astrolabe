@@ -1,0 +1,99 @@
+Astrolabe Notices
+
+This file records the release-critical notices for the combined Astrolabe
+distribution. Source license files remain authoritative.
+
+Astrolabe integration code
+- Copyright (c) 2026 Chris Royse.
+- License/grant: see LICENSE in this repository.
+
+Calyx
+- Path: calyx
+- Source license: calyx/LICENSE
+- License: Business Source License 1.1 for standalone Calyx, with an
+  Astrolabe-specific owner-granted combined-distribution grant recorded in the
+  root LICENSE file.
+
+codebase-memory-mcp
+- Path: cbm
+- Source license: cbm/LICENSE
+- License: MIT License.
+- Copyright notice in source license: Copyright (c) 2025 DeusData.
+
+tree-sitter common/runtime
+- Paths:
+  - cbm/internal/cbm/vendored/common/LICENSE
+  - cbm/internal/cbm/vendored/common/tree_sitter/LICENSE
+- License: MIT License.
+
+tree-sitter runtime library
+- Path: cbm/internal/cbm/vendored/ts_runtime
+- Source license: cbm/internal/cbm/vendored/ts_runtime/LICENSE
+- License: MIT License.
+
+tree-sitter grammars
+- Path: cbm/internal/cbm/vendored/grammars
+- License: each grammar carries its own LICENSE file in its grammar directory.
+  Distribution packaging must preserve those files.
+
+SQLite
+- Path: cbm/vendored/sqlite3
+- Source license: cbm/vendored/sqlite3/LICENSE.md
+- License/notice: public domain blessing as published by SQLite.
+
+mimalloc
+- Path: cbm/vendored/mimalloc
+- Source license: cbm/vendored/mimalloc/LICENSE
+- License: MIT License.
+
+zstd
+- Path: cbm/internal/cbm/vendored/zstd
+- Source license: cbm/internal/cbm/vendored/zstd/LICENSE
+- License: BSD License.
+
+lz4
+- Path: cbm/internal/cbm/vendored/lz4
+- Source license: cbm/internal/cbm/vendored/lz4/LICENSE
+- License: BSD-style license.
+
+wyhash
+- Path: cbm/internal/cbm/vendored/wyhash
+- Source license: cbm/internal/cbm/vendored/wyhash/LICENSE
+- License: Unlicense / public domain dedication.
+
+simplecpp
+- Path: cbm/internal/cbm/vendored/simplecpp
+- Source license: cbm/internal/cbm/vendored/simplecpp/LICENSE
+- License: BSD Zero Clause License.
+
+verstable
+- Path: cbm/internal/cbm/vendored/verstable
+- Source license: cbm/internal/cbm/vendored/verstable/LICENSE
+- License: MIT License.
+
+xxHash
+- Path: cbm/vendored/xxhash
+- Source license: cbm/vendored/xxhash/LICENSE
+- License: BSD 2-Clause License.
+
+yyjson
+- Path: cbm/vendored/yyjson
+- Source license: cbm/vendored/yyjson/LICENSE
+- License: MIT License.
+
+TRE
+- Path: cbm/vendored/tre
+- Source license: cbm/vendored/tre/LICENSE
+- License: BSD-style license.
+
+nomic embedding assets
+- Path: cbm/vendored/nomic
+- Source license: cbm/vendored/nomic/LICENSE
+- Source notice: cbm/vendored/nomic/NOTICE
+- License: Apache License 2.0.
+
+Node graph UI dependencies
+- Path: cbm/graph-ui/node_modules
+- Notice status: package-manager generated dependency notices remain a release
+  packaging task. This root NOTICE does not replace per-package notices under
+  node_modules.

@@ -1,0 +1,144 @@
+use super::{AsterVault, durable, encode, ledger_hook};
+use crate::cf::ColumnFamily;
+use calyx_core::{CalyxError, Clock, LedgerRef, Result, Seq};
+use calyx_ledger::{ActorId, EntryKind, SubjectId};
+
+impl<C> AsterVault<C>
+where
+    C: Clock,
+{
+    pub fn write_cf_batch_with_ledger_entry(
+        &self,
+        rows: impl IntoIterator<Item = (ColumnFamily, Vec<u8>, Vec<u8>)>,
+        kind: EntryKind,
+        subject: SubjectId,
+        payload: Vec<u8>,
+        actor: ActorId,
+    ) -> Result<Seq> {
+        let mut data_rows = rows
+            .into_iter()
+            .map(|(cf, key, value)| encode::WriteRow { cf, key, value })
+            .collect::<Vec<_>>();
+        if data_rows.is_empty() {
+            return Ok(self.latest_seq());
+        }
+
+        self.with_durable_commit_lock(|| {
+            let data_row_count = data_rows.len();
+            if let Some(hook) = &self.ledger_hook {
+                let mut hook = ledger_hook::lock_hook(hook)?;
+                let mut rows = Vec::with_capacity(data_rows.len() + 2);
+                // Ledger-bind: stage the ledger entry and stamp its ref into every
+                // Base/Graph provenance field (decode + re-encode per row) — the
+                // #444 breakdown isolates this from the durable commit that follows.
+                let bind = crate::commit_timing::start();
+                let staged = ledger_hook::stage_entry_payload(
+                    &hook, &mut rows, kind, subject, payload, actor,
+                )?;
+                let ledger_ref = staged_ledger_ref(&staged)?;
+                attach_ledger_ref_to_rows(&mut data_rows, &ledger_ref)?;
+                rows.extend(data_rows);
+                bind.stop("ledger_bind", data_row_count, 0);
+                // Ownership handed straight to the commit path: no full-batch copy
+                // to append the time-index row (#444 lever).
+                let seq = self.commit_rows_locked_owned(rows)?;
+                ledger_hook::commit_staged(&mut hook, &staged)?;
+                return Ok(seq);
+            }
+
+            let mut transient = self.transient_ledger_hook()?;
+            let hook = transient
+                .get_mut()
+                .map_err(|_| CalyxError::ledger_group_commit_failed("transient hook poisoned"))?;
+            let mut rows = Vec::with_capacity(data_rows.len() + 1);
+            let bind = crate::commit_timing::start();
+            let staged =
+                ledger_hook::stage_entry_payload(hook, &mut rows, kind, subject, payload, actor)?;
+            let ledger_ref = staged_ledger_ref(&staged)?;
+            attach_ledger_ref_to_rows(&mut data_rows, &ledger_ref)?;
+            rows.extend(data_rows);
+            bind.stop("ledger_bind", data_row_count, 0);
+            let seq = self.commit_rows_locked_owned(rows)?;
+            ledger_hook::commit_staged(hook, &staged)?;
+            Ok(seq)
+        })
+    }
+
+    fn transient_ledger_hook(&self) -> Result<ledger_hook::AsterLedgerHook<C>> {
+        let ledger_rows = self
+            .scan_cf_at(self.latest_seq(), ColumnFamily::Ledger)?
+            .into_iter()
+            .map(|(key, value)| encode::WriteRow {
+                cf: ColumnFamily::Ledger,
+                key,
+                value,
+            })
+            .collect::<Vec<_>>();
+        let batches = if ledger_rows.is_empty() {
+            Vec::new()
+        } else {
+            vec![durable::RecoveredBatch {
+                seq: self.latest_seq(),
+                rows: ledger_rows,
+            }]
+        };
+        ledger_hook::recover_hook(
+            &durable::RecoveredBatches {
+                batches,
+                last_recovered_seq: self.latest_seq(),
+                wal_replay_floor_seq: 0,
+                derived_content_floor_seq: 0,
+                torn_tail: None,
+                temporal_policy: None,
+                dedup_policy: None,
+                retention_horizon: crate::timetravel::RetentionHorizon::default(),
+                router_latest_readback: false,
+            },
+            None,
+            std::sync::Arc::clone(&self.clock),
+        )
+    }
+}
+
+fn staged_ledger_ref(staged: &[calyx_ledger::StagedLedgerRow]) -> Result<calyx_core::LedgerRef> {
+    staged
+        .first()
+        .map(calyx_ledger::StagedLedgerRow::ledger_ref)
+        .ok_or_else(|| CalyxError::ledger_group_commit_failed("no staged ledger rows"))
+}
+
+fn attach_ledger_ref_to_rows(rows: &mut [encode::WriteRow], ledger_ref: &LedgerRef) -> Result<()> {
+    for row in rows.iter_mut().filter(|row| row.cf == ColumnFamily::Base) {
+        let mut constellation = encode::decode_constellation_base(&row.value)?;
+        constellation.provenance = ledger_ref.clone();
+        row.value = encode::encode_constellation_base(&constellation)?;
+    }
+    for row in rows.iter_mut().filter(|row| row.cf == ColumnFamily::Graph) {
+        attach_ledger_ref_to_graph_json_row(row, ledger_ref)?;
+    }
+    Ok(())
+}
+
+fn attach_ledger_ref_to_graph_json_row(
+    row: &mut encode::WriteRow,
+    ledger_ref: &LedgerRef,
+) -> Result<()> {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&row.value) else {
+        return Ok(());
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Ok(());
+    };
+    if !object.contains_key("provenance") {
+        return Ok(());
+    }
+    object.insert(
+        "provenance".to_string(),
+        serde_json::to_value(ledger_ref).map_err(|error| {
+            CalyxError::aster_corrupt_shard(format!("encode graph provenance: {error}"))
+        })?,
+    );
+    row.value = serde_json::to_vec(&value)
+        .map_err(|error| CalyxError::aster_corrupt_shard(format!("encode graph row: {error}")))?;
+    Ok(())
+}

@@ -1,0 +1,146 @@
+use std::path::{Path, PathBuf};
+
+use crate::error::{CliError, CliResult};
+use crate::partitioned_bench::rrf_plan::{self, DEFAULT_ASSOCIATION_KEY};
+
+pub(crate) fn run(raw: &[String]) -> CliResult {
+    let args = Args::parse(raw)?;
+    let (mut record, source_readback) =
+        rrf_plan::read(&args.from_cf_root, &args.from_plan_key).map_err(CliError::Calyx)?;
+    let source_base_dir = record.base_dir.clone();
+    for slot in &mut record.plan.slots {
+        let old_name = slot.vault.file_name().ok_or_else(|| {
+            CliError::usage(format!(
+                "slot {} vault path has no final component: {}",
+                slot.slot,
+                slot.vault.display()
+            ))
+        })?;
+        let new_vault = args.vault_root.join(old_name);
+        require_dir(&new_vault, "remapped vault")?;
+        require_file(&rrf_plan::resolve(&source_base_dir, &slot.corpus), "corpus")?;
+        if args.queries_from_corpus {
+            slot.queries = slot.corpus.clone();
+        } else {
+            require_file(
+                &rrf_plan::resolve(&source_base_dir, &slot.queries),
+                "queries",
+            )?;
+        }
+        if let Some(query_start_row) = args.query_start_row {
+            slot.query_start_row = query_start_row;
+        }
+        slot.vault = new_vault;
+    }
+    if let Some(base_dir) = args.base_dir {
+        record.base_dir = base_dir;
+    }
+    record.imported_plan_sha256 =
+        rrf_plan::plan_identity_sha256(&record.base_dir, &record.plan).map_err(CliError::Calyx)?;
+    let written =
+        rrf_plan::write(&args.cf_root, &args.plan_key, &record).map_err(CliError::Calyx)?;
+    println!(
+        "partitioned_rrf_plan_remap_db from_cf_root={} from_plan_key={} source_value_sha256={} cf_root={} plan_key={} slot_count={} vault_root={} queries_from_corpus={} query_start_row={} plan_sha256={} value_bytes={} value_sha256={} readback_matches={}",
+        args.from_cf_root.display(),
+        args.from_plan_key,
+        source_readback.value_sha256,
+        written.cf_root,
+        written.association_key,
+        record.plan.slots.len(),
+        args.vault_root.display(),
+        args.queries_from_corpus,
+        args.query_start_row.unwrap_or(0),
+        record.imported_plan_sha256,
+        written.value_bytes,
+        written.value_sha256,
+        written.readback_matches
+    );
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct Args {
+    from_cf_root: PathBuf,
+    from_plan_key: String,
+    cf_root: PathBuf,
+    plan_key: String,
+    vault_root: PathBuf,
+    base_dir: Option<PathBuf>,
+    queries_from_corpus: bool,
+    query_start_row: Option<u64>,
+}
+
+impl Args {
+    fn parse(raw: &[String]) -> CliResult<Self> {
+        let mut from_cf_root = None;
+        let mut from_plan_key = DEFAULT_ASSOCIATION_KEY.to_string();
+        let mut cf_root = None;
+        let mut plan_key = DEFAULT_ASSOCIATION_KEY.to_string();
+        let mut vault_root = None;
+        let mut base_dir = None;
+        let mut queries_from_corpus = false;
+        let mut query_start_row = None;
+        let mut it = raw.iter();
+        while let Some(flag) = it.next() {
+            let mut next = || {
+                it.next()
+                    .cloned()
+                    .ok_or_else(|| CliError::usage(format!("{flag} requires a value")))
+            };
+            match flag.as_str() {
+                "--from-cf-root" => from_cf_root = Some(PathBuf::from(next()?)),
+                "--from-plan-key" => from_plan_key = next()?,
+                "--cf-root" => cf_root = Some(PathBuf::from(next()?)),
+                "--association-key" | "--plan-key" => plan_key = next()?,
+                "--vault-root" => vault_root = Some(PathBuf::from(next()?)),
+                "--base-dir" => base_dir = Some(PathBuf::from(next()?)),
+                "--queries-from-corpus" => queries_from_corpus = true,
+                "--query-start-row" => {
+                    query_start_row = Some(super::parse(&next()?, "--query-start-row")?)
+                }
+                other => return Err(CliError::usage(format!("unknown flag: {other}"))),
+            }
+        }
+        require_key("--from-plan-key", &from_plan_key)?;
+        require_key("--plan-key", &plan_key)?;
+        Ok(Self {
+            from_cf_root: from_cf_root
+                .ok_or_else(|| CliError::usage("--from-cf-root <aster-dir> is required"))?,
+            from_plan_key,
+            cf_root: cf_root.ok_or_else(|| CliError::usage("--cf-root <aster-dir> is required"))?,
+            plan_key,
+            vault_root: vault_root
+                .ok_or_else(|| CliError::usage("--vault-root <dir> is required"))?,
+            base_dir,
+            queries_from_corpus,
+            query_start_row,
+        })
+    }
+}
+
+fn require_key(flag: &'static str, value: &str) -> CliResult {
+    if value.trim().is_empty() {
+        return Err(CliError::usage(format!("{flag} must be non-empty")));
+    }
+    Ok(())
+}
+
+fn require_dir(path: &Path, label: &'static str) -> CliResult {
+    if !path.is_dir() {
+        return Err(CliError::usage(format!(
+            "{label} path does not exist or is not a directory: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn require_file(path: &Path, label: &'static str) -> CliResult {
+    if !path.is_file() {
+        return Err(CliError::usage(format!(
+            "{label} path does not exist or is not a file: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}

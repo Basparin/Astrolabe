@@ -1,0 +1,20 @@
+[package]
+name = "astrolabe-guard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+astrolabe-domain.workspace = true
+astrolabe-panel.workspace = true
+calyx-core.workspace = true
+sha2 = "0.10"
+
+[lib]
+path = "src/lib.rs"
+
+# Test-only tree-sitter grammars for calibration parse verification. These are
+# dev-dependencies: nothing in the shipped binary depends on them. Runtime
+# parse-through-libcbm stays the guard_check path's concern.

@@ -1,0 +1,27 @@
+[package]
+name = "astrolabe-lower"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+astrolabe-domain.workspace = true
+astrolabe-ingest.workspace = true
+astrolabe-weave.workspace = true
+calyx-aster.workspace = true
+calyx-core.workspace = true
+calyx-ledger.workspace = true
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zstd = "0.13"
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+# astrolabe-panel is consumed by examples/perturb_vault_and_lower.rs.
+astrolabe-panel.workspace = true
