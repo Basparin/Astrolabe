@@ -221,15 +221,14 @@ impl<'a> SubjectGraphIndex<'a> {
         // (absolute) report path; node-map paths are project-relative.
         let mut best: Option<&str> = None;
         for file in self.file_members.keys() {
+            if !norm.ends_with(file) {
+                continue;
+            }
+            // ends_with guarantees norm.len() >= file.len(); strict greater
+            // means a preceding byte exists to boundary-check.
             let boundary_ok = norm.len() == file.len()
-                || norm
-                    .as_bytes()
-                    .get(norm.len().checked_sub(file.len() + 1)?)
-                    == Some(&b'/');
-            if norm.ends_with(file)
-                && boundary_ok
-                && best.is_none_or(|current| file.len() > current.len())
-            {
+                || norm.as_bytes()[norm.len() - file.len() - 1] == b'/';
+            if boundary_ok && best.is_none_or(|current| file.len() > current.len()) {
                 best = Some(file);
             }
         }
@@ -290,6 +289,17 @@ impl<'a> SubjectGraphIndex<'a> {
             "cases_resolved": cases_resolved,
             "unresolved_case_ids": unresolved_case_ids,
             "symbols": symbols.into_iter().collect::<Vec<_>>(),
+            // Resolution-graph observability: enough to tell "node map empty",
+            // "file paths shaped differently", and "no edges" apart from here.
+            "node_map_nodes": self.node_meta.len(),
+            "node_map_files": self.file_members.len(),
+            "edge_sources": self.out_edges.len(),
+            "sample_files": self
+                .file_members
+                .keys()
+                .filter(|file| file.contains("__tests__") || file.contains("monthly"))
+                .take(5)
+                .collect::<Vec<_>>(),
         })
     }
 }
@@ -471,5 +481,13 @@ mod tests {
         );
         assert!(index.targets_for("C:/repo/src/unknown.test.ts::case").is_none());
         assert!(index.targets_for("no-separator").is_none());
+        // Regression: a project-relative case path equal to the node-map key
+        // must resolve — the first cut aborted the whole scan via a misplaced
+        // `?` whenever any map key was at least as long as the case path.
+        assert!(
+            index
+                .targets_for("src/__tests__/monthly-usage.test.ts::relative case")
+                .is_some()
+        );
     }
 }
