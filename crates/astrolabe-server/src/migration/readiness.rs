@@ -1,4 +1,7 @@
 use super::*;
+
+use calyx_core::{AnchorKind, AnchorValue};
+
 pub(crate) const GET_READINESS_SCHEMA: &str = "astrolabe.get_readiness.v1";
 pub(crate) const READINESS_TIER_MEASUREMENTS_SCHEMA: &str = "astrolabe.readiness_tiers.v1";
 
@@ -14,8 +17,15 @@ pub(crate) fn readiness_status_json_at(
     let readiness_measurements = readiness_tier_measurements_json(cache_dir, project)?;
     let layout_coherence_tier =
         readiness_layout_coherence_tier(cache_dir, project, effective_scope)?;
+    // #5: measure oracle_clean from the persisted anchors when there are any.
+    // The measurement WINS over a configured `readiness_tiers_json` row: that row
+    // is hand-authored and asserts its own `trust`, so letting it override real
+    // anchor evidence would make the gate self-certifying. The configured row
+    // stays as the fallback for a project with no anchors yet; absent both, the
+    // tier reports not_persisted exactly as before.
+    let measured_oracle_clean = readiness_oracle_clean_tier(cache_dir, project)?;
     let tiers = vec![
-        readiness_configured_tier(
+        measured_oracle_clean.unwrap_or_else(|| readiness_configured_tier(
             &readiness_measurements,
             "oracle_clean",
             effective_scope,
@@ -23,7 +33,7 @@ pub(crate) fn readiness_status_json_at(
             "oracle-clean >= 0.7",
             "oracle_evidence:not_persisted",
             "mine and persist oracle outcome anchors plus flakiness/self-consistency ceilings for this scope",
-        ),
+        )),
         readiness_configured_tier(
             &readiness_measurements,
             "panel_sufficient",
@@ -33,7 +43,7 @@ pub(crate) fn readiness_status_json_at(
             "assay_sufficiency:not_persisted",
             "run measure_bits sufficiency for the requested axis and persist the panel/axis deficit card",
         ),
-        readiness_kernel_recall_tier(&kernel_context, effective_scope),
+        readiness_kernel_recall_tier(&kernel_context, project, effective_scope),
         readiness_configured_tier(
             &readiness_measurements,
             "calibrated",
@@ -351,15 +361,33 @@ pub(crate) fn readiness_tier_row_matches(row: &Value, tier: &str, scope: &str, a
     scope_matches && axis_matches
 }
 
-pub(crate) fn readiness_kernel_recall_tier(kernel_context: &Value, scope: &str) -> Value {
+pub(crate) fn readiness_kernel_recall_tier(
+    kernel_context: &Value,
+    project: &str,
+    scope: &str,
+) -> Value {
     let summaries = kernel_context
         .get("scope_summaries")
         .and_then(|scope_summaries| scope_summaries.get("summaries"))
         .and_then(Value::as_array);
+    // #6, other half: a caller who passes no scope gets `scope == project`, but
+    // the project-wide summary is keyed `repo:<project>`. Match the requested
+    // scope first, then fall back to the project-wide summary when the request
+    // denotes the whole project — so project-level readiness measures this tier
+    // instead of always reporting scope_missing.
+    let project_scope_id = format!("repo:{project}");
     let Some(summary) = summaries.and_then(|summaries| {
         summaries
             .iter()
             .find(|summary| summary.get("scope_id").and_then(Value::as_str) == Some(scope))
+            .or_else(|| {
+                (scope == project).then(|| {
+                    summaries.iter().find(|summary| {
+                        summary.get("scope_id").and_then(Value::as_str)
+                            == Some(project_scope_id.as_str())
+                    })
+                })?
+            })
     }) else {
         return readiness_unavailable_tier(
             "kernel_exists",
@@ -440,6 +468,131 @@ pub(crate) fn readiness_kernel_recall_tier(kernel_context: &Value, scope: &str) 
 /// floor it is observe-only. Fails closed to a labeled unavailable tier when no
 /// enforcement row is persisted for the scope (no S23 posteriors, or a scope with
 /// no scored members) or the persisted row is malformed — never a fabricated pass.
+/// Fraction of anchored subjects an oracle must agree on before the tier passes.
+const ORACLE_CLEAN_THRESHOLD: f64 = 0.7;
+/// Cap on provenance refs echoed into the tier row, so a large corpus does not
+/// produce a multi-megabyte readiness response. The count is always exact.
+const ORACLE_CLEAN_PROVENANCE_CAP: usize = 64;
+
+/// Measures `oracle_clean` from the persisted `TestPass` anchors (#5).
+///
+/// v1 metric: **the share of anchored subjects whose test outcomes are all
+/// passing.** One subject (one `cx_id`) is clean when every `TestPass` anchor on
+/// it is `Bool(true)`; a single failing anchor makes it dirty. This is the
+/// cheapest measurement that is honestly derived rather than declared, and it
+/// answers the tier's question directly: of the code the oracle actually covers,
+/// how much of it is green.
+///
+/// Deliberately NOT in v1, and why: flakiness and self-consistency ceilings need
+/// repeated runs of the same subject over time to estimate, and the anchor CF
+/// records `(source, observed_at)` per anchor but no run grouping — so those
+/// ceilings need a producer of their own before they can be scored. The tier
+/// value here is a floor on oracle cleanliness, not the full blueprint metric.
+///
+/// Evidence discipline: every number comes from anchor rows read back and
+/// key-verified out of the vault by [`read_anchor_rows`], and the provenance refs
+/// are the subjects' own constellation ids. Nothing here can pass by asserting
+/// that it passed. When no anchors exist the tier stays *unmeasured* — an empty
+/// corpus is not a clean one.
+pub(crate) fn readiness_oracle_clean_tier(
+    cache_dir: &Path,
+    project: &str,
+) -> Result<Option<Value>, DynError> {
+    let (vault_dir, vault_id, vault_salt) = shadow_vault_config_at(cache_dir, project)?;
+    if !vault_dir.exists() {
+        return Ok(None);
+    }
+    let vault = open_shadow_vault_read_only(
+        &vault_dir,
+        &vault_id,
+        &vault_salt,
+        vec![ColumnFamily::Anchors, ColumnFamily::Kv],
+    )?;
+    let rows = astrolabe_anchors::read_anchor_rows(&vault)?;
+    drop(vault);
+
+    let mut total = 0usize;
+    let mut clean = 0usize;
+    let mut all_resolved = true;
+    let mut refs: Vec<String> = Vec::new();
+    for persisted in &rows {
+        if persisted.row.kind != AnchorKind::TestPass {
+            continue;
+        }
+        total += 1;
+        let subject_clean = persisted
+            .row
+            .anchors
+            .iter()
+            .all(|anchor| matches!(anchor.value, AnchorValue::Bool(true)));
+        if subject_clean {
+            clean += 1;
+        }
+        // A proxy source (confidence < 1.0) still counts toward the metric, but
+        // it cannot carry the row to `verified` trust.
+        if persisted
+            .row
+            .anchors
+            .iter()
+            .any(|anchor| anchor.confidence < 1.0)
+        {
+            all_resolved = false;
+        }
+        if refs.len() < ORACLE_CLEAN_PROVENANCE_CAP {
+            refs.push(format!(
+                "anchor:TestPass:cx={}",
+                hex_lower(persisted.row.cx_id.as_bytes())
+            ));
+        }
+    }
+    if total == 0 {
+        return Ok(None);
+    }
+
+    let value = clean as f64 / total as f64;
+    let pass = value >= ORACLE_CLEAN_THRESHOLD;
+    let mut tier = json!({
+        "tier": "oracle_clean",
+        "pass": pass,
+        "measured": true,
+        "value": {
+            "oracle_clean": value,
+            "clean_subjects": clean,
+            "anchored_subjects": total,
+            "threshold": ORACLE_CLEAN_THRESHOLD,
+            "metric": "share of TestPass-anchored subjects with no failing anchor",
+        },
+        "required": "oracle-clean >= 0.7",
+        "provenance_refs": refs,
+        "provenance_truncated": total > ORACLE_CLEAN_PROVENANCE_CAP,
+        "source": "shadow_vault:anchors",
+        "freshness": "fresh",
+        "trust": if all_resolved { "verified" } else { "provisional" },
+        "cheapest_fix": Value::Null,
+    });
+    if !pass {
+        tier["cheapest_fix"] = json!(format!(
+            "{} of {total} anchored subjects carry a failing TestPass anchor: fix the failing \
+             subjects (or retract stale anchors with anchor_erase) until oracle-clean reaches {}",
+            total - clean,
+            ORACLE_CLEAN_THRESHOLD
+        ));
+    }
+    Ok(Some(tier))
+}
+
+/// True when `scope` is the kernel scope id denoting the whole project.
+///
+/// The shadow import keys the project-wide kernel scope summary as
+/// `repo:<project>`; callers who pass that id mean the same thing as passing no
+/// scope at all. Kept as one predicate so the two scope vocabularies are
+/// reconciled in exactly one place (#6).
+pub(crate) fn is_project_scope_id(project: &str, scope: &str) -> bool {
+    scope
+        .strip_prefix("repo:")
+        .is_some_and(|rest| rest == project)
+}
+
 pub(crate) fn readiness_layout_coherence_tier(
     cache_dir: &Path,
     project: &str,
@@ -456,7 +609,14 @@ pub(crate) fn readiness_layout_coherence_tier(
              the directory role in astro.layout.declared_map.v1",
         )
     };
-    let enforce_scope = if scope == project {
+    // #6: layout enforcement persists the whole-project row under the "@project"
+    // sentinel, while the kernel scope summaries persist theirs under the scope id
+    // "repo:<project>". Both denote the same thing — the project as a whole — but
+    // `readiness_status_json_at` resolves ONE effective scope for every tier, so
+    // treating only `scope == project` as project-level made the two tiers
+    // mutually exclusive: whichever scope the caller passed, at most one of them
+    // could ever be measured. Accept both spellings of "the whole project" here.
+    let enforce_scope = if scope == project || is_project_scope_id(project, scope) {
         layout_enforcement_project_scope()
     } else {
         scope
@@ -526,4 +686,76 @@ pub(crate) fn refresh_readiness_artifact_hash(readiness: &mut Value) {
     }
     let artifact_bytes = serde_json::to_vec(&artifact_source).unwrap_or_default();
     readiness["artifact_sha256"] = json!(hex_lower(&Sha256::digest(&artifact_bytes)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kernel_context_with_project_summary(scope_id: &str) -> Value {
+        json!({
+            "schema": "astrolabe.kernel_context.v1",
+            "status": "built",
+            "freshness": "fresh",
+            "trust": "verified",
+            "scope_summaries": {
+                "summaries": [{
+                    "scope_id": scope_id,
+                    "recall_millipoints": 950u64,
+                    "recall": {"recalled": 3476u64, "total": 3658u64},
+                    "grounded_member_count": 100u64,
+                    "total_member_count": 169u64,
+                    "trust": "verified",
+                    "freshness": "fresh",
+                    "members": [],
+                }]
+            }
+        })
+    }
+
+    /// #6: the project-wide kernel summary is keyed `repo:<project>`, but a
+    /// caller who passes no scope is resolved to `scope == project`. Before the
+    /// fix that combination always reported scope_missing, so project-level
+    /// readiness could never measure this tier.
+    #[test]
+    fn kernel_tier_measures_project_level_against_the_repo_scope_summary() {
+        let context = kernel_context_with_project_summary("repo:lawen-app");
+
+        let tier = readiness_kernel_recall_tier(&context, "lawen-app", "lawen-app");
+        assert_eq!(
+            tier.get("measured").and_then(Value::as_bool),
+            Some(true),
+            "project-level request must resolve the repo:<project> summary"
+        );
+        assert_eq!(tier.get("pass").and_then(Value::as_bool), Some(true));
+
+        // The explicit scope id keeps working unchanged.
+        let explicit = readiness_kernel_recall_tier(&context, "lawen-app", "repo:lawen-app");
+        assert_eq!(explicit.get("measured").and_then(Value::as_bool), Some(true));
+    }
+
+    /// A genuine sub-scope must still miss rather than silently borrowing the
+    /// project-wide summary — the fallback is only for whole-project requests.
+    #[test]
+    fn kernel_tier_still_reports_scope_missing_for_an_unknown_sub_scope() {
+        let context = kernel_context_with_project_summary("repo:lawen-app");
+        let tier = readiness_kernel_recall_tier(&context, "lawen-app", "repo:lawen-app/src/api");
+        assert_eq!(tier.get("measured").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            tier.get("source").and_then(Value::as_str),
+            Some("kernel_context.scope_summaries:scope_missing")
+        );
+    }
+
+    /// #6, layout half: `repo:<project>` denotes the whole project, so it must
+    /// reach the "@project" enforcement row instead of missing it. Paired with
+    /// the kernel test above, this is what lets ONE call measure both tiers.
+    #[test]
+    fn repo_scope_id_is_recognised_as_the_whole_project() {
+        assert!(is_project_scope_id("lawen-app", "repo:lawen-app"));
+        assert!(!is_project_scope_id("lawen-app", "repo:lawen-app/src"));
+        assert!(!is_project_scope_id("lawen-app", "repo:other"));
+        assert!(!is_project_scope_id("lawen-app", "lawen-app"));
+        assert!(!is_project_scope_id("lawen-app", "@project"));
+    }
 }
