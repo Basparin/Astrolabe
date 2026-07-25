@@ -474,6 +474,71 @@ const ORACLE_CLEAN_THRESHOLD: f64 = 0.7;
 /// produce a multi-megabyte readiness response. The count is always exact.
 const ORACLE_CLEAN_PROVENANCE_CAP: usize = 64;
 
+/// Counted result of scoring one project's anchor rows.
+pub(crate) struct OracleCleanScore {
+    /// Subjects carrying at least one `TestPass` anchor.
+    pub total: usize,
+    /// Of those, the ones with no failing anchor.
+    pub clean: usize,
+    /// Every contributing anchor came from a resolved (confidence 1.0) source.
+    pub all_resolved: bool,
+    /// Capped provenance refs; `total` is always the exact count.
+    pub refs: Vec<String>,
+}
+
+/// Pure scoring half of [`readiness_oracle_clean_tier`], split out so the rule
+/// that decides a gate has a test that fails when the rule breaks. Returns
+/// `None` when the project carries no `TestPass` anchor at all — an empty corpus
+/// is not a clean one, so the tier stays unmeasured rather than scoring 1.0.
+pub(crate) fn oracle_clean_score(
+    rows: &[astrolabe_anchors::PersistedAnchorRow],
+) -> Option<OracleCleanScore> {
+    let mut total = 0usize;
+    let mut clean = 0usize;
+    let mut all_resolved = true;
+    let mut refs: Vec<String> = Vec::new();
+    for persisted in rows {
+        if persisted.row.kind != AnchorKind::TestPass {
+            continue;
+        }
+        total += 1;
+        // A subject is clean only when EVERY anchor on it passed. Anything that
+        // is not an explicit `Bool(true)` — a failure, or a value of another
+        // shape on this axis — leaves the subject dirty rather than being
+        // silently skipped.
+        let subject_clean = persisted
+            .row
+            .anchors
+            .iter()
+            .all(|anchor| matches!(anchor.value, AnchorValue::Bool(true)));
+        if subject_clean {
+            clean += 1;
+        }
+        // A proxy source (confidence < 1.0) still counts toward the metric, but
+        // it cannot carry the row to `verified` trust.
+        if persisted
+            .row
+            .anchors
+            .iter()
+            .any(|anchor| anchor.confidence < 1.0)
+        {
+            all_resolved = false;
+        }
+        if refs.len() < ORACLE_CLEAN_PROVENANCE_CAP {
+            refs.push(format!(
+                "anchor:TestPass:cx={}",
+                hex_lower(persisted.row.cx_id.as_bytes())
+            ));
+        }
+    }
+    (total > 0).then_some(OracleCleanScore {
+        total,
+        clean,
+        all_resolved,
+        refs,
+    })
+}
+
 /// Measures `oracle_clean` from the persisted `TestPass` anchors (#5).
 ///
 /// v1 metric: **the share of anchored subjects whose test outcomes are all
@@ -511,43 +576,15 @@ pub(crate) fn readiness_oracle_clean_tier(
     let rows = astrolabe_anchors::read_anchor_rows(&vault)?;
     drop(vault);
 
-    let mut total = 0usize;
-    let mut clean = 0usize;
-    let mut all_resolved = true;
-    let mut refs: Vec<String> = Vec::new();
-    for persisted in &rows {
-        if persisted.row.kind != AnchorKind::TestPass {
-            continue;
-        }
-        total += 1;
-        let subject_clean = persisted
-            .row
-            .anchors
-            .iter()
-            .all(|anchor| matches!(anchor.value, AnchorValue::Bool(true)));
-        if subject_clean {
-            clean += 1;
-        }
-        // A proxy source (confidence < 1.0) still counts toward the metric, but
-        // it cannot carry the row to `verified` trust.
-        if persisted
-            .row
-            .anchors
-            .iter()
-            .any(|anchor| anchor.confidence < 1.0)
-        {
-            all_resolved = false;
-        }
-        if refs.len() < ORACLE_CLEAN_PROVENANCE_CAP {
-            refs.push(format!(
-                "anchor:TestPass:cx={}",
-                hex_lower(persisted.row.cx_id.as_bytes())
-            ));
-        }
-    }
-    if total == 0 {
+    let Some(score) = oracle_clean_score(&rows) else {
         return Ok(None);
-    }
+    };
+    let OracleCleanScore {
+        total,
+        clean,
+        all_resolved,
+        refs,
+    } = score;
 
     let value = clean as f64 / total as f64;
     let pass = value >= ORACLE_CLEAN_THRESHOLD;
@@ -711,6 +748,66 @@ mod tests {
                 }]
             }
         })
+    }
+
+
+    fn anchor_row(tag: &str, kind: AnchorKind, values: &[(bool, f32)]) -> astrolabe_anchors::PersistedAnchorRow {
+        let cx_id = calyx_core::CxId::from_input(tag.as_bytes(), 1, b"test-salt");
+        let anchors = values
+            .iter()
+            .enumerate()
+            .map(|(i, (passed, confidence))| calyx_core::Anchor {
+                kind: kind.clone(),
+                value: AnchorValue::Bool(*passed),
+                source: format!("ci:probe#{i}"),
+                observed_at: 1_700_000_000,
+                confidence: *confidence,
+            })
+            .collect();
+        astrolabe_anchors::PersistedAnchorRow {
+            key: Vec::new(),
+            row: astrolabe_anchors::AnchorRowV1 {
+                schema: astrolabe_anchors::SCHEMA_ANCHOR_ROW.to_string(),
+                cx_id,
+                kind,
+                anchors,
+            },
+        }
+    }
+
+    /// #5: the scoring rule itself. A subject counts as clean only when every
+    /// anchor on it passed, so one failure among many passes still makes it dirty.
+    #[test]
+    fn oracle_clean_counts_a_subject_dirty_when_any_anchor_failed() {
+        let rows = vec![
+            anchor_row("clean-a", AnchorKind::TestPass, &[(true, 1.0), (true, 1.0)]),
+            anchor_row("clean-b", AnchorKind::TestPass, &[(true, 1.0)]),
+            anchor_row("dirty", AnchorKind::TestPass, &[(true, 1.0), (false, 1.0)]),
+        ];
+        let score = oracle_clean_score(&rows).expect("anchors present");
+        assert_eq!((score.total, score.clean), (3, 2));
+        assert!(score.all_resolved);
+    }
+
+    /// A corpus with no TestPass anchor must stay UNMEASURED. Scoring it 1.0
+    /// would let a project with zero evidence pass the gate.
+    #[test]
+    fn oracle_clean_is_unmeasured_without_test_anchors() {
+        assert!(oracle_clean_score(&[]).is_none());
+        let other_axis = vec![anchor_row("thumbs", AnchorKind::Thumbs, &[(true, 1.0)])];
+        assert!(
+            oracle_clean_score(&other_axis).is_none(),
+            "a non-TestPass axis must not be scored as oracle cleanliness"
+        );
+    }
+
+    /// A proxy source cannot carry the tier to `verified` trust.
+    #[test]
+    fn oracle_clean_drops_to_provisional_on_a_proxy_source() {
+        let rows = vec![anchor_row("proxy", AnchorKind::TestPass, &[(true, 0.8)])];
+        let score = oracle_clean_score(&rows).expect("anchors present");
+        assert_eq!((score.total, score.clean), (1, 1));
+        assert!(!score.all_resolved, "confidence < 1.0 must not be verified");
     }
 
     /// #6: the project-wide kernel summary is keyed `repo:<project>`, but a
