@@ -1915,6 +1915,32 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
                     }
                 }
             }
+            // Rust receiver-aware guard (FINDING-001). A method call is a
+            // field-access call: `expr.name(args...)`, or `expr.name::<...>(args...)`
+            // for a turbofish call. tree-sitter-rust models both as a
+            // call_expression whose `function` field is a field_expression
+            // (turbofish wraps that field_expression inside a generic_function).
+            // When the LSP pass cannot resolve the receiver type, the resolver
+            // falls back to a weak short-name strategy and fabricates a CALLS edge
+            // onto the sole namesake definition (every `.clone()` -> the one
+            // hand-written impl Clone). Flag receiver-based method calls so the
+            // resolver's cbm_rust_suppress_weak_method_match can drop ONLY those
+            // weak strategies. Associated functions (`Type::func(...)`) and free
+            // functions (`func(...)`) are scoped_identifier / identifier
+            // function-fields — NOT field-access calls — so they keep
+            // is_method=false and their genuine unique-name matches still emit.
+            if (ctx->language == CBM_LANG_RUST &&
+                strcmp(ts_node_type(node), "call_expression") == 0) {
+                TSNode rfn = ts_node_child_by_field_name(node, TS_FIELD("function"));
+                if (!ts_node_is_null(rfn) &&
+                    strcmp(ts_node_type(rfn), "generic_function") == 0) {
+                    rfn = ts_node_child_by_field_name(rfn, TS_FIELD("function"));
+                }
+                if (!ts_node_is_null(rfn) &&
+                    strcmp(ts_node_type(rfn), "field_expression") == 0) {
+                    call.is_method = true;
+                }
+            }
 
             TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
             if (!ts_node_is_null(args)) {
