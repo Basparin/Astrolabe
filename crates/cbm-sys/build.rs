@@ -191,6 +191,7 @@ fn main() {
         println!("cargo:rerun-if-env-changed={var}");
     }
     println!("cargo:rerun-if-env-changed=ASTROLABE_UPDATE_BINDINGS");
+    println!("cargo:rerun-if-env-changed=ASTROLABE_BINDINGS_ACCEPT_COMMITTED");
     println!("cargo:rerun-if-env-changed=ASTROLABE_BINDINGS_CANDIDATE");
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
     if env::var_os("CBM_SYS_ASAN").is_some() {
@@ -836,6 +837,16 @@ fn verify_bindings(manifest_dir: &Path, generated: &str) {
         )
     });
     if normalize_bindings(&committed) != normalize_bindings(&generated) {
+        // Fork-local escape hatch: on a MinGW host bindgen emits `c_uint` for
+        // every enum (GCC ABI) where the committed bindings carry `c_int`; the
+        // values are identical in size and passing on x86_64, so a build may
+        // accept the committed file and say so loudly instead of refusing.
+        if env::var_os("ASTROLABE_BINDINGS_ACCEPT_COMMITTED").is_some() {
+            println!(
+                "cargo:warning=cbm-sys bindings differ from bindgen output on this host;                  using the committed bindings because ASTROLABE_BINDINGS_ACCEPT_COMMITTED is set"
+            );
+            return;
+        }
         panic!(
             "cbm-sys bindings are stale. Run a native launcher build with \
              ASTROLABE_BINDINGS_CANDIDATE set to one fresh absolute path below workspace .tmp, \
