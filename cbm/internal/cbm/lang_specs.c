@@ -1048,7 +1048,11 @@ static const char *bend2_func_types[] = {"function_definition", "law_declaration
 static const char *bend2_class_types[] = {"type_declaration", NULL};
 static const char *bend2_field_types[] = {"constructor_declaration", NULL};
 static const char *bend2_call_types[] = {"call_expression", NULL};
-static const char *bend2_import_types[] = {"import_declaration", NULL};
+// ponytail: imports deliberately NOT extracted for Bend 2. The generic import
+// pass derives the local name from the path text (`./SCORER.bend` -> `bend`)
+// and ignores the `as` alias, so every PROOF file collides on `bend`
+// (CBM_IMPORT_LOCAL_NAME_AMBIGUOUS). Upgrade: a bend2 branch that reads the
+// `path` and `alias` fields of import_declaration, then list it here.
 static const char *bend2_branch_types[] = {"match_expression", NULL};
 static const char *bend2_var_types[] = {"let_expression", NULL};
 static const char *bend2_module_types[] = {"source_file", NULL};
@@ -2056,7 +2060,7 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
 
     // CBM_LANG_BEND2
     [CBM_LANG_BEND2] = {CBM_LANG_BEND2, bend2_func_types, bend2_class_types, bend2_field_types,
-                        bend2_module_types, bend2_call_types, bend2_import_types, empty_types,
+                        bend2_module_types, bend2_call_types, empty_types, empty_types,
                         bend2_branch_types, bend2_var_types, empty_types, empty_types, NULL,
                         empty_types, NULL, NULL, tree_sitter_bend2, NULL},
 
