@@ -418,10 +418,10 @@ fn run_cli(args: &[String]) -> Result<i32, DynError> {
         return Ok(code);
     }
 
-    let runner = CbmToolRunner::new_default()?;
     let result = if index_worker {
-        runner.handle_tool_raw(&tool_name, &args_json)?
+        run_index_worker_pass(&tool_name, &args_json)?
     } else {
+        let runner = CbmToolRunner::new_default()?;
         migration::handle_tool_raw(&runner, &tool_name, &args_json)?
     };
     if let Some(path) = response_out.as_ref() {
@@ -458,6 +458,48 @@ fn run_cli(args: &[String]) -> Result<i32, DynError> {
         eprintln!("astrolabe cli progress: done tool={tool_name} exit={code}");
     }
     Ok(code)
+}
+
+/// Stack given to the supervised index-worker thread.
+///
+/// The CBM extraction pass descends the parse tree, and how much stack each
+/// level costs is a property of the *compiler that built it*, not of the input:
+/// the same commit rebuilt with a newer GCC overflowed the 2 MiB Windows
+/// main-thread default on a repository whose only content was `{"name": "x"}`,
+/// while the previous build of that same source indexed it fine. The depth is
+/// bounded — 32 MiB was already enough — so this is a headroom problem, not a
+/// runaway recursion.
+///
+/// It is fixed here rather than with a linker `--stack` argument on purpose. A
+/// link flag lives in build environment state, and losing a piece of build
+/// environment state is precisely how the overflow shipped in the first place;
+/// a thread stack sized in the source travels with the code.
+const INDEX_WORKER_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+/// Runs the index pass on a thread with [`INDEX_WORKER_STACK_BYTES`] of stack.
+///
+/// The runner is constructed inside the thread because it owns C-side handles
+/// and is not `Send`.
+fn run_index_worker_pass(tool_name: &str, args_json: &str) -> Result<String, DynError> {
+    let tool_name = tool_name.to_string();
+    let args_json = args_json.to_string();
+    let worker = std::thread::Builder::new()
+        .name("astrolabe-index-worker".to_string())
+        .stack_size(INDEX_WORKER_STACK_BYTES)
+        // `DynError` is not `Send`, so the error is stringified inside the
+        // thread and re-boxed by the caller.
+        .spawn(move || {
+            CbmToolRunner::new_default()
+                .and_then(|runner| runner.handle_tool_raw(&tool_name, &args_json))
+                .map_err(|error| error.to_string())
+        })?;
+    match worker.join() {
+        Ok(result) => Ok(result?),
+        // A panic here is already reported by the default hook; the supervisor
+        // reads the non-zero exit, so surface it as a plain error rather than
+        // resuming the unwind on the parent thread.
+        Err(_) => Err("index worker thread panicked".into()),
+    }
 }
 
 /// Print per-tool `--help` for `astrolabe cli <tool> --help` (#416) and return 0
