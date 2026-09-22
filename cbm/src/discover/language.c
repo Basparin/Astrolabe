@@ -312,6 +312,9 @@ static const ext_entry_t EXT_TABLE[] = {
     /* Beancount */
     {".beancount", CBM_LANG_BEANCOUNT},
 
+    /* Bend 2 */
+    {".bend", CBM_LANG_BEND2},
+
     /* BibTeX */
     {".bib", CBM_LANG_BIBTEX},
 
@@ -747,6 +750,7 @@ static const char *LANG_NAMES[CBM_LANG_COUNT] = {
     [CBM_LANG_TYPST] = "Typst",
     [CBM_LANG_GDSCRIPT] = "GDScript",
     [CBM_LANG_GLEAM] = "Gleam",
+    [CBM_LANG_BEND2] = "Bend2",
     [CBM_LANG_POWERSHELL] = "PowerShell",
     [CBM_LANG_PASCAL] = "Pascal",
     [CBM_LANG_DLANG] = "D",

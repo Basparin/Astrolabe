@@ -1291,5 +1291,19 @@
     "filenames": [],
     "has_scanner": true,
     "module_root": "source_file"
+  },
+  {
+    "name": "bend2",
+    "enum": "BEND2",
+    "display": "Bend2",
+    "ts_func": "tree_sitter_bend2",
+    "repo": "https://github.com/nicolas-abril/tree-sitter-bend2",
+    "subdir": "",
+    "extensions": [
+      ".bend"
+    ],
+    "filenames": [],
+    "has_scanner": true,
+    "module_root": "source_file"
   }
 ]

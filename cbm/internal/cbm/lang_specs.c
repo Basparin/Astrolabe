@@ -76,6 +76,7 @@ extern const TSLanguage *tree_sitter_solidity(void);
 extern const TSLanguage *tree_sitter_typst(void);
 extern const TSLanguage *tree_sitter_gdscript(void);
 extern const TSLanguage *tree_sitter_gleam(void);
+extern const TSLanguage *tree_sitter_bend2(void);
 extern const TSLanguage *tree_sitter_powershell(void);
 extern const TSLanguage *tree_sitter_pascal(void);
 extern const TSLanguage *tree_sitter_d(void);
@@ -1042,6 +1043,15 @@ static const char *gleam_branch_types[] = {"case", "case_clause", NULL};
 static const char *gleam_var_types[] = {"let", "constant", NULL};
 static const char *gleam_assign_types[] = {"let_assert", NULL};
 static const char *gleam_module_types[] = {"source_file", NULL};
+// Bend 2 (nicolas-abril/tree-sitter-bend2): def/law carry field `name`; type has `name` + constructors.
+static const char *bend2_func_types[] = {"function_definition", "law_declaration", NULL};
+static const char *bend2_class_types[] = {"type_declaration", NULL};
+static const char *bend2_field_types[] = {"constructor_declaration", NULL};
+static const char *bend2_call_types[] = {"call_expression", NULL};
+static const char *bend2_import_types[] = {"import_declaration", NULL};
+static const char *bend2_branch_types[] = {"match_expression", NULL};
+static const char *bend2_var_types[] = {"let_expression", NULL};
+static const char *bend2_module_types[] = {"source_file", NULL};
 static const char *powershell_func_types[] = {"function_statement", NULL};
 static const char *powershell_class_types[] = {"class_statement", "enum_statement", NULL};
 static const char *powershell_field_types[] = {"class_property_definition", NULL};
@@ -2043,6 +2053,12 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
                         gleam_module_types, gleam_call_types, gleam_import_types, empty_types,
                         gleam_branch_types, gleam_var_types, gleam_assign_types, empty_types, NULL,
                         empty_types, NULL, NULL, tree_sitter_gleam, NULL},
+
+    // CBM_LANG_BEND2
+    [CBM_LANG_BEND2] = {CBM_LANG_BEND2, bend2_func_types, bend2_class_types, bend2_field_types,
+                        bend2_module_types, bend2_call_types, bend2_import_types, empty_types,
+                        bend2_branch_types, bend2_var_types, empty_types, empty_types, NULL,
+                        empty_types, NULL, NULL, tree_sitter_bend2, NULL},
 
     // CBM_LANG_POWERSHELL
     [CBM_LANG_POWERSHELL] = {CBM_LANG_POWERSHELL, powershell_func_types, powershell_class_types,

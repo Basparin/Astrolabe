@@ -264,6 +264,11 @@ const TSLanguage *tree_sitter_gitignore(void) {
     return NULL;
 }
 #endif
+#ifndef CBM_CORE_bend2
+const TSLanguage *tree_sitter_bend2(void) {
+    return NULL;
+}
+#endif
 #ifndef CBM_CORE_gleam
 const TSLanguage *tree_sitter_gleam(void) {
     return NULL;
