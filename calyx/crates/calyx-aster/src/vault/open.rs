@@ -105,11 +105,12 @@ where
             )?,
         };
         if recovery.mode == durable::RecoveryMode::LatestRouter {
+            // `Option<&Vec<_>>` is Copy, so the `move` closure copies the borrow
+            // instead of moving `options.selected_cfs` (still read below).
+            let selected_cfs = options.selected_cfs.as_ref();
             router.replay_latest_rows(recovery.batches.iter().flat_map(|batch| {
                 batch.rows.iter().filter_map(move |row| {
-                    options
-                        .selected_cfs
-                        .as_ref()
+                    selected_cfs
                         .is_none_or(|selected| selected.contains(&row.cf))
                         .then_some((batch.seq, row.cf, row.key.as_slice(), row.value.as_slice()))
                 })
