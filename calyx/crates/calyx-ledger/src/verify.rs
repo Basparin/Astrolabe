@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use calyx_core::{CalyxError, Result};
 
-use crate::append::LedgerCfStore;
+use crate::append::{LedgerCfStore, LedgerRow};
 use crate::codec::decode_unchecked;
 use crate::entry::{HASH_BYTES, LedgerEntry, compute_entry_hash};
 
