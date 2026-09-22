@@ -22,7 +22,9 @@
 use std::collections::BTreeMap;
 
 use calyx_core::{CxId, SlotVector};
-use calyx_forge::{Scalar8ExactKnnReceipt, scalar8_exact_knn_cpu, scalar8_exact_knn_cuda};
+#[cfg(feature = "cuda")]
+use calyx_forge::scalar8_exact_knn_cuda;
+use calyx_forge::{Scalar8ExactKnnReceipt, scalar8_exact_knn_cpu};
 use calyx_sextant::{HnswIndex, PackedVector, QuantConfig, SextantIndex};
 
 use crate::{
@@ -787,8 +789,16 @@ fn forge_exact_dense_candidates(
         crate::knobs::WEAVE_EXACT_KNN_EXECUTOR_CPU => {
             scalar8_exact_knn_cpu(codes, pool, dim as usize, k)
         }
+        #[cfg(feature = "cuda")]
         crate::knobs::WEAVE_EXACT_KNN_EXECUTOR_CUDA => {
             scalar8_exact_knn_cuda(codes, pool, dim as usize, k)
+        }
+        #[cfg(not(feature = "cuda"))]
+        crate::knobs::WEAVE_EXACT_KNN_EXECUTOR_CUDA => {
+            return Err(format!(
+                "ASTRO_WEAVE_EXACT_KNN_EXECUTOR_UNAVAILABLE: executor={executor} (cuda) requested but this binary was built without the `cuda` feature; use executor={} (cpu) or rebuild with --features astrolabe-weave/cuda; no partial similarity plan was published",
+                crate::knobs::WEAVE_EXACT_KNN_EXECUTOR_CPU
+            ));
         }
         observed => {
             return Err(format!(
