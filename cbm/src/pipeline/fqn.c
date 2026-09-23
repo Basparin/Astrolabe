@@ -276,8 +276,22 @@ char *cbm_pipeline_fqn_module_dir(const char *project, const char *rel_path, boo
         last_sep = last_bwd;
     }
     if (!last_sep) {
-        /* Root file: empty directory → module is just the project. */
-        return cbm_pipeline_fqn_folder(project, "");
+        /* Root file in a directory-module language (Go/Java): the package is
+         * declared in the file itself, so the module QN is the project prefixed
+         * by the file stem (extension stripped) — e.g. "proj.a" for a.go. This
+         * keeps root-level modules distinct from the Project atom and from each
+         * other. MUST agree with the extraction-side module QN derivation. */
+        char *path = strdup(rel_path ? rel_path : "");
+        if (!path) {
+            return NULL;
+        }
+        cbm_normalize_path_sep(path);
+        strip_file_extension(path);
+        const char *stem = strrchr(path, '/');
+        stem = stem ? stem + 1 : path;
+        char *res = cbm_pipeline_fqn_folder(project, stem);
+        free(path);
+        return res;
     }
     size_t dir_len = (size_t)(last_sep - src);
     char *dir = (char *)malloc(dir_len + 1); /* +1 for NUL */
