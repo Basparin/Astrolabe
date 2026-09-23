@@ -212,6 +212,11 @@ static void route_edge_visitor(const cbm_gbuf_edge_t *edge, void *userdata) {
     }
 
     /* Create or find Route node (deduped by QN) */
+    const cbm_gbuf_node_t *existing_route = cbm_gbuf_find_by_qn(ctx->gb, route_qn);
+    if (existing_route) {
+        ctx->created++;
+        return;
+    }
     cbm_gbuf_upsert_node(ctx->gb, "Route", url, route_qn, "", 0, 0, route_props);
     ctx->created++;
 
@@ -455,11 +460,18 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
     snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", method,
              cbm_route_canon_path(path, cpath, sizeof(cpath)));
     const cbm_gbuf_node_t *existing = cbm_gbuf_find_by_qn(gb, route_qn);
-
-    char rprops[CBM_SZ_256];
-    snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"source\":\"decorator\"}", method);
-    int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", path, route_qn,
-                                            func->file_path ? func->file_path : "", 0, 0, rprops);
+    int64_t route_id;
+    if (existing) {
+        route_id = existing->id;
+    } else {
+        char rprops[CBM_SZ_256];
+        snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"source\":\"decorator\"}", method);
+        route_id = cbm_gbuf_upsert_node(gb, "Route", path, route_qn,
+                                        func->file_path ? func->file_path : "", 0, 0, rprops);
+        if (route_id == 0) {
+            return 0;
+        }
+    }
 
     if (existing) {
         const cbm_gbuf_edge_t **existing_handles = NULL;
@@ -1155,10 +1167,16 @@ static void sveltekit_file_visitor(const cbm_gbuf_node_t *node, void *userdata) 
         char route_props[CBM_SZ_256];
         snprintf(route_props, sizeof(route_props),
                  "{\"method\":\"%s\",\"framework\":\"sveltekit\"}", method);
-        int64_t route_id =
-            cbm_gbuf_upsert_node(ctx->gb, "Route", route_path, route_qn, "", 0, 0, route_props);
-        if (route_id == 0) {
-            continue;
+        const cbm_gbuf_node_t *existing_sk_route = cbm_gbuf_find_by_qn(ctx->gb, route_qn);
+        int64_t sk_route_id = 0;
+        if (!existing_sk_route) {
+            sk_route_id =
+                cbm_gbuf_upsert_node(ctx->gb, "Route", route_path, route_qn, "", 0, 0, route_props);
+            if (sk_route_id == 0) {
+                continue;
+            }
+        } else {
+            sk_route_id = existing_sk_route->id;
         }
         ctx->routes_created++;
 
@@ -1166,7 +1184,7 @@ static void sveltekit_file_visitor(const cbm_gbuf_node_t *node, void *userdata) 
         snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\",\"framework\":\"sveltekit\"%s}",
                  child->qualified_name ? child->qualified_name : child->name,
                  is_actions ? ",\"via\":\"actions_object\"" : "");
-        cbm_gbuf_insert_edge(ctx->gb, child->id, route_id, "HANDLES", hprops);
+        cbm_gbuf_insert_edge(ctx->gb, child->id, sk_route_id, "HANDLES", hprops);
         ctx->handles_created++;
     }
 }
