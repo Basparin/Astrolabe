@@ -3367,17 +3367,17 @@ int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src) {
                     free(existing_route->file_path);
                     existing_route->file_path = heap_strdup(sn->file_path);
                 }
-                if (!*remap) {
-                    *remap = cbm_ht_create(CBM_SZ_32);
+                if (!remap) {
+                    remap = cbm_ht_create(CBM_SZ_32);
                 }
-                if (*remap) {
+                if (remap) {
                     char key[CBM_SZ_32];
                     make_id_key(key, sizeof(key), sn->id);
                     int64_t *val = malloc(sizeof(int64_t));
                     char *owned_key = strdup(key);
                     if (val && owned_key) {
                         *val = existing_route->id;
-                        if (!gbuf_ht_set(dst, *remap, owned_key, val, NULL, "route_merge_dedup.remap")) {
+                        if (!gbuf_ht_set(dst, remap, owned_key, val, NULL, "route_merge_dedup.remap")) {
                             free(owned_key);
                             free(val);
                         }
