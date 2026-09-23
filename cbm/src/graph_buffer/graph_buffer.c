@@ -3347,6 +3347,48 @@ int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src) {
         cbm_gbuf_node_t *existing = cbm_ht_get(dst->node_by_atom, sn->atom_id);
         if (existing) {
             merge_update_existing(dst, existing, sn, &remap);
+        } else if (sn->label && strcmp(sn->label, "Route") == 0) {
+            /* Merge-time Route dedup: parallel workers cannot see each other's
+             * atoms at insert time (pass_parallel.c extracts on per-thread parsers),
+             * so the same HTTP method+path discovered in two files collides at merge.
+             * commit a8900595 added insert-time guards in pass_route_nodes.c, but those
+             * cannot prevent the collision because each worker's cbm_gbuf_find_by_qn
+             * only sees its own graph. The collision is created here when the second
+             * worker's Route node is copied and register_node_in_indexes marks the QN
+             * AMBIGUOUS_QN (graph_buffer.c:787). Fix: before copying a Route node,
+             * look it up by QN in dst; if one already exists, reuse it and remap
+             * the skipped node's ID so edges are retargeted (merge_remap_edges). */
+            void *existing_by_qn = cbm_ht_get(dst->node_by_qn, sn->qualified_name);
+            if (existing_by_qn && existing_by_qn != AMBIGUOUS_QN) {
+                cbm_gbuf_node_t *existing_route = (cbm_gbuf_node_t *)existing_by_qn;
+                /* Adopt incoming file_path if the existing Route has none. */
+                if ((!existing_route->file_path || !existing_route->file_path[0]) &&
+                    sn->file_path && sn->file_path[0]) {
+                    free(existing_route->file_path);
+                    existing_route->file_path = heap_strdup(sn->file_path);
+                }
+                if (!*remap) {
+                    *remap = cbm_ht_create(CBM_SZ_32);
+                }
+                if (*remap) {
+                    char key[CBM_SZ_32];
+                    make_id_key(key, sizeof(key), sn->id);
+                    int64_t *val = malloc(sizeof(int64_t));
+                    char *owned_key = strdup(key);
+                    if (val && owned_key) {
+                        *val = existing_route->id;
+                        if (!gbuf_ht_set(dst, *remap, owned_key, val, NULL, "route_merge_dedup.remap")) {
+                            free(owned_key);
+                            free(val);
+                        }
+                    } else {
+                        free(val);
+                        free(owned_key);
+                    }
+                }
+                continue;
+            }
+            merge_copy_new_node(dst, sn);
         } else {
             merge_copy_new_node(dst, sn);
         }
