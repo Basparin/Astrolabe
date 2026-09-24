@@ -1383,14 +1383,38 @@ char *cbm_fqn_compute_source_lang(CBMArena *a, const char *project, const char *
         // All other languages keep the legacy filename-stem symbol QN.
         return cbm_fqn_compute(a, project, rel_path, name);
     }
-    char *module = cbm_fqn_module_source_lang(a, project, rel_path, lang);
-    if (!module) {
+    if (!rel_path) {
+        rel_path = "";
+    }
+    // Module is the CONTAINING DIRECTORY: strip the basename (last '/' segment).
+    const char *last_slash = strrchr(rel_path, '/');
+    if (!last_slash) {
+        // Root file in a directory-module language (Go/Java): the package is
+        // declared in the file itself, so the module QN is the project prefixed
+        // by the file stem (extension stripped) — e.g. "proj.pflag" for pflag.go.
+        // This keeps root-level modules distinct from the Project atom and from
+        // each other. MUST agree with the pipeline-side module QN derivation
+        // (cbm_pipeline_fqn_module_dir, fqn.c).
+        char *path = strdup(rel_path ? rel_path : "");
+        if (!path) {
+            return NULL;
+        }
+        cbm_normalize_path_sep(path);
+        strip_file_extension(path);
+        const char *stem = strrchr(path, '/');
+        stem = stem ? stem + 1 : path;
+        char *res = cbm_fqn_folder(a, project, stem);
+        free(path);
+        return res;
+    }
+    size_t dir_len = (size_t)(last_slash - rel_path);
+    char *dir = (char *)cbm_arena_alloc(a, dir_len + SKIP_ONE);
+    if (!dir) {
         return NULL;
     }
-    if (!name || !name[0]) {
-        return module;
-    }
-    return cbm_arena_sprintf(a, "%s.%s", module, name);
+    memcpy(dir, rel_path, dir_len);
+    dir[dir_len] = '\0';
+    return cbm_fqn_folder(a, project, dir);
 }
 
 char *cbm_fqn_folder(CBMArena *a, const char *project, const char *rel_dir) {
