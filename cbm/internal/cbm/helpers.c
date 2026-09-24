@@ -7,6 +7,26 @@
 #include "foundation/compat.h" // CBM_TLS
 #include <stdlib.h>            // calloc/free for the symbol-set cache
 
+/* Normalize path separators: replace backslashes with forward slashes */
+static void cbm_normalize_path_sep(char *path) {
+    while (*path) {
+        if (*path == '\\') {
+            *path = '/';
+        }
+        path++;
+    }
+}
+
+/* Strip file extension from the last path component */
+static void strip_file_extension(char *path) {
+    char *last_slash = strrchr(path, '/');
+    char *start = last_slash ? last_slash + 1 : path;
+    char *ext = strrchr(start, '.');
+    if (ext) {
+        *ext = '\0';
+    }
+}
+
 enum {
     MIN_ROUTE_LEN = 3,
     MIN_SYS_PATH_LEN = 4,
